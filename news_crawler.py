@@ -78,7 +78,7 @@ class NewsCrawler:
                 except Exception as e:
                     logger.error(f"[{source_id}] 爬取异常: {e}")
 
-        # 过滤：敏感词 + 批次去重 + 历史去重
+        # 过滤：敏感词 + 批次去重 + 历史去重 + 公司公告
         filtered = []
         for news in all_news:
             if self.contains_sensitive(news["title"]):
@@ -86,6 +86,8 @@ class NewsCrawler:
             if self.is_duplicate(news["title"]):
                 continue
             if recent_keywords and self._is_similar_to_recent(news["title"], recent_keywords):
+                continue
+            if self._is_company_announcement(news["title"]):
                 continue
             news["keywords"] = self.extract_keywords(news["title"])
             filtered.append(news)
@@ -128,13 +130,27 @@ class NewsCrawler:
 
     def _crawl_source(self, source_id, source_cfg):
         """爬取单个源"""
+        news_list = []
+
         # SAMR 走专用 API
         if source_id == "samr" and "api_url" in source_cfg:
-            return self._crawl_samr_api(source_cfg)
+            items = self._crawl_samr_api(source_cfg)
+        else:
+            items = self._crawl_source_html(source_id, source_cfg)
 
-        news_list = []
+        for item in items:
+            if len(item.get("title", "")) > 8:
+                item["source"] = source_cfg["name"]
+                item["category"] = source_cfg["category"]
+                item["region"] = source_cfg["region"]
+                news_list.append(item)
+
+        return news_list[:5]  # 每个源最多5条
+
+    def _crawl_source_html(self, source_id, source_cfg):
+        """通过HTML爬取单个源"""
+        items = []
         base_url = source_cfg.get("base_url", "")
-        # 如果没有配置base_url，从URL推导
         if not base_url:
             from urllib.parse import urlparse
             parsed = urlparse(source_cfg["url"])
@@ -153,7 +169,6 @@ class NewsCrawler:
                 resp.encoding = resp.apparent_encoding or 'utf-8'
                 soup = BeautifulSoup(resp.text, 'html.parser')
 
-                # 针对性提取策略
                 if source_id in ("spc", "spc_ip"):
                     items = self._extract_spc_items(soup, base_url, source_id)
                 elif source_id == "cnipa":
@@ -161,20 +176,13 @@ class NewsCrawler:
                 else:
                     items = self._extract_news_items(soup, source_id, base_url)
 
-                for item in items:
-                    if len(item.get("title", "")) > 8:
-                        item["source"] = source_cfg["name"]
-                        item["category"] = source_cfg["category"]
-                        item["region"] = source_cfg["region"]
-                        news_list.append(item)
-
-                if news_list:
-                    break  # 有结果就不用 fallback URL
+                if items:
+                    break
             except Exception as e:
                 logger.debug(f"[{source_id}] {url} 请求失败: {e}")
                 continue
 
-        return news_list[:5]  # 每个源最多5条
+        return items
 
     def enrich_with_images(self, news_list, max_per_item=3):
         """为新闻列表补充源文章页面的图片"""
@@ -410,6 +418,9 @@ class NewsCrawler:
                     for a in soup.select('.news-title_1YtI1 a, .c-title a'):
                         title = a.get_text(strip=True)
                         if title and len(title) > 10:
+                            if self._is_company_announcement(title):
+                                logger.debug(f"百度兜底跳过公司公告: {title[:30]}")
+                                continue
                             news_list.append({
                                 "title": title,
                                 "source": "百度新闻",
@@ -468,4 +479,22 @@ class NewsCrawler:
             if total > 0 and overlap / total >= threshold:
                 return True
 
+        return False
+
+    def _is_company_announcement(self, title):
+        """检查是否为公司公告（如"泰林生物:关于取得商标注册证书..."）"""
+        # 匹配 "公司名:关于..." 或 "公司名：关于..." 模式
+        if re.search(r'[\w]{2,10}[:：]\s*关于[取得获得收到]', title):
+            return True
+        # 匹配纯公司公告关键词
+        announcement_patterns = [
+            r'关于取得[商标专利著作权]',
+            r'关于获得[商标专利著作权]',
+            r'关于收到[商标专利著作权]',
+            r'关于[取得获得收到].*证书',
+            r'关于[取得获得收到].*注册',
+        ]
+        for pattern in announcement_patterns:
+            if re.search(pattern, title):
+                return True
         return False

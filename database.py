@@ -43,6 +43,7 @@ class Database:
                 for col, dtype in [
                     ("category", "VARCHAR(20)"),
                     ("keywords", "TEXT"),
+                    ("original_title", "VARCHAR(200)"),
                 ]:
                     try:
                         cursor.execute(f"ALTER TABLE articles ADD COLUMN {col} {dtype}")
@@ -75,14 +76,14 @@ class Database:
             logger.error(f"数据库初始化失败: {e}")
 
     def save_article(self, title, content, media_id, status="draft",
-                     category=None, keywords=None):
+                     category=None, keywords=None, original_title=None):
         try:
             conn = self.get_connection()
             with conn.cursor() as cursor:
                 cursor.execute(
-                    "INSERT INTO articles (title, content, media_id, status, category, keywords) "
-                    "VALUES (%s, %s, %s, %s, %s, %s)",
-                    (title, content, media_id, status, category, keywords)
+                    "INSERT INTO articles (title, original_title, content, media_id, status, category, keywords) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                    (title, original_title or title, content, media_id, status, category, keywords)
                 )
             conn.commit()
             conn.close()
@@ -97,7 +98,7 @@ class Database:
             conn = self.get_connection()
             with conn.cursor() as cursor:
                 cursor.execute(
-                    "SELECT id, title, category, keywords, created_at "
+                    "SELECT id, title, original_title, category, keywords, created_at "
                     "FROM articles WHERE created_at > DATE_SUB(NOW(), INTERVAL %s DAY) "
                     "ORDER BY created_at DESC",
                     (days,)
@@ -114,7 +115,10 @@ class Database:
         articles = self.get_recent_articles(days)
         keywords = set()
         for article in articles:
-            if article.get("title"):
+            # 优先使用原始标题去重（更准确）
+            if article.get("original_title"):
+                keywords.add(article["original_title"])
+            elif article.get("title"):
                 keywords.add(article["title"])
             if article.get("keywords"):
                 for kw in article["keywords"].split(","):

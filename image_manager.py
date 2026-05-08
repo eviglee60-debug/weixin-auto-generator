@@ -50,27 +50,18 @@ class ImageManager:
         images = []
 
         try:
-            # 根据关键词生成搜索词
+            # 根据关键词生成搜索词 - 提取核心主题
             keywords = self._extract_keywords(title)
             search_query = " ".join(keywords[:3])
 
-            if region == "china":
-                # 使用百度图片搜索
-                url = "https://image.baidu.com/search/acjson"
-                params = {
-                    "tn": "resultjson_com",
-                    "word": search_query,
-                    "pn": 0,
-                    "rn": 10
-                }
-            else:
-                url = "https://image.baidu.com/search/acjson"
-                params = {
-                    "tn": "resultjson_com",
-                    "word": search_query + " intellectual property",
-                    "pn": 0,
-                    "rn": 10
-                }
+            # 使用百度图片搜索
+            url = "https://image.baidu.com/search/acjson"
+            params = {
+                "tn": "resultjson_com",
+                "word": search_query,
+                "pn": 0,
+                "rn": 10
+            }
 
             response = requests.get(url, params=params, headers=self.headers, timeout=15)
 
@@ -89,26 +80,29 @@ class ImageManager:
                 except:
                     pass
 
-            # 如果没抓到图片，生成占位图
+            # 不再生成托底图，有多少返回多少
             if not images:
-                images = self._generate_placeholder_images(title, keywords)
+                logger.warning(f"  未找到相关图片")
 
         except Exception as e:
             logger.error(f"抓取图片失败: {e}")
-            images = self._generate_placeholder_images(title, [title[:6]])
 
         return images[:3]  # 最多返回3张图
 
     def _extract_keywords(self, title):
-        """从标题提取关键词"""
+        """从标题提取关键词 - 提取核心主题用于图片搜索"""
         import re
         # 移除常见前缀
-        title = re.sub(r'^(关注|解读|聚焦|速看|解析)', '', title)
-        # 提取中文词组
+        title = re.sub(r'^(关注|解读|聚焦|速看|解析|深度)', '', title)
+        # 提取中文词组（2-6个字）
         words = re.findall(r'[一-龥]{2,6}', title)
-        # 添加通用关键词
-        keywords = words + ["知识产权", "法律"]
-        return keywords[:5]
+        # 去掉太通用的词
+        generic_words = ["知识产权", "法律", "分析", "解读", "关注", "聚焦", "速看", "解析"]
+        keywords = [w for w in words if w not in generic_words]
+        # 如果关键词太少，保留原始词
+        if len(keywords) < 2:
+            keywords = words
+        return keywords[:4]
 
     def _generate_placeholder_images(self, title, keywords):
         """生成占位图片（当抓取失败时使用）"""

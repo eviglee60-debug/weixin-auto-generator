@@ -5,6 +5,7 @@ import time
 import schedule
 import sys
 import os
+from datetime import datetime
 
 os.makedirs("/opt/weixin-auto-generator/logs", exist_ok=True)
 
@@ -28,6 +29,7 @@ from weixin_publisher import WeixinPublisher
 from database import Database
 from image_manager import ImageManager
 from knowledge_client import KnowledgeClient
+from hot_topic_finder import HotTopicFinder
 
 
 class Scheduler:
@@ -38,6 +40,7 @@ class Scheduler:
         self.db = Database()
         self.image_manager = ImageManager()
         self.kb_client = KnowledgeClient()
+        self.hot_topic_finder = HotTopicFinder()
 
     def generate_and_publish(self):
         try:
@@ -68,9 +71,12 @@ class Scheduler:
             # 从待用队列补充不足的分类
             for cat in Config.ARTICLE_CATEGORIES:
                 if not any(n.get("category") == cat for n in selected):
-                    pending_news = self.db.get_pending_news(cat, limit=1)
-                    if pending_news:
-                        pn = pending_news[0]
+                    pending_news = self.db.get_pending_news(cat, limit=3)
+                    for pn in pending_news:
+                        # 过滤公司公告
+                        if self.crawler._is_company_announcement(pn["title"]):
+                            self.db.mark_used_pending(pn["id"])
+                            continue
                         selected.append({
                             "title": pn["title"],
                             "source": pn["source"],
@@ -80,12 +86,30 @@ class Scheduler:
                         })
                         self.db.mark_used_pending(pn["id"])
                         logger.info(f"从待用队列补充 [{cat}]: {pn['title']}")
+                        break
 
             logger.info(f"最终选定 {len(selected)} 条新闻")
 
             if not selected:
                 logger.error("未获取到任何新闻，任务终止")
                 return
+
+            # 步骤1.5: 用 last30days-cn 搜索热点法律话题，替换 hot_topic 文章
+            hot_topic = self._find_hot_topic()
+            if hot_topic:
+                # 替换 selected 中的 hot_topic 文章
+                for i, news in enumerate(selected):
+                    if news.get("category") == "hot_topic":
+                        selected[i] = hot_topic
+                        logger.info(f"  热点话题已替换: {hot_topic['title'][:30]}...")
+                        break
+                else:
+                    # 如果没有 hot_topic，替换最后一个
+                    if len(selected) >= Config.DAILY_ARTICLE_COUNT:
+                        selected[-1] = hot_topic
+                    else:
+                        selected.append(hot_topic)
+                    logger.info(f"  热点话题已添加: {hot_topic['title'][:30]}...")
 
             # 补充源文章图片
             logger.info("提取源文章配图...")
@@ -139,6 +163,7 @@ class Scheduler:
 
                     articles.append({
                         "title": short_title,
+                        "original_title": title,
                         "digest": digest,
                         "content": content_with_images,
                         "source": source,
@@ -179,6 +204,7 @@ class Scheduler:
                             status="draft",
                             category=article.get("category"),
                             keywords=article.get("keywords"),
+                            original_title=article.get("original_title"),
                         )
                     logger.info("文章已保存到数据库")
                 except Exception as e:
@@ -214,6 +240,25 @@ class Scheduler:
                 seen.add(news["title"])
                 all_remaining.append(news)
 
+        # 使用 last30days-cn 搜索更多有价值的法律资讯
+        try:
+            digest_items = self.hot_topic_finder.find_digest_items()
+            if digest_items:
+                logger.info(f"  last30days-cn 搜索到 {len(digest_items)} 条额外资讯")
+                for item in digest_items:
+                    title = item.get("title", "")
+                    if title and title not in seen:
+                        seen.add(title)
+                        all_remaining.append({
+                            "title": title,
+                            "source": item.get("source", ""),
+                            "category": "hot_topic",
+                            "url": item.get("url", ""),
+                            "_extra_cat": item.get("category", ""),
+                        })
+        except Exception as e:
+            logger.warning(f"  last30days-cn 搜索失败: {e}")
+
         if len(all_remaining) < 3:
             return None
 
@@ -225,47 +270,60 @@ class Scheduler:
 
         # 英文标题翻译映射（常见法律术语）
         en_translate = {
-            "v.": "诉",
-            "Inc.": "公司",
-            "Corp.": "公司",
-            "LLC": "公司",
-            "LP": "公司",
-            "opinion": "意见",
-            "Opinion": "意见",
-            "Court": "法院",
-            "Order": "命令",
-            "Patent": "专利",
-            "Trademark": "商标",
-            "Supreme": "最高",
-            "Appeal": "上诉",
-            "District": "地区",
-            "Federal": "联邦",
-            "Circuit": "巡回",
-            "Justice": "大法官",
-            "Judge": "法官",
-            "Rights": "权利",
-            "Infringement": "侵权",
-            "Litigation": "诉讼",
-            "Settlement": "和解",
-            "Damages": "赔偿",
-            "License": "许可",
-            "Application": "申请",
-            "Examination": "审查",
-            "Grant": "授权",
-            "Validity": "有效性",
-            "Claim": "权利要求",
-            "Specification": "说明书",
-            "Prior Art": "现有技术",
+            # 机构和角色
+            "v.": "诉", "vs.": "诉", "V.": "诉",
+            "Inc.": "公司", "Corp.": "公司", "LLC": "公司", "LP": "公司",
+            "Co.": "公司", "Ltd.": "公司", "PLC": "公司",
+            "Court": "法院", "Supreme": "最高", "District": "地区",
+            "Federal": "联邦", "Circuit": "巡回", "Justice": "大法官", "Judge": "法官",
+            "Chief Justice": "首席大法官", "Justice": "大法官",
+            # 法律术语
+            "opinion": "意见", "Opinion": "意见", "Order": "命令", "Rule": "规则",
+            "decision": "裁决", "Decision": "裁决", "ruling": "裁定",
+            "patent": "专利", "Patent": "专利", "patents": "专利",
+            "trademark": "商标", "Trademark": "商标", "trademark": "商标",
+            "copyright": "著作权", "Copyright": "著作权",
+            "design": "外观设计", "Design": "外观设计",
+            "Appeal": "上诉", "appeal": "上诉", "appellate": "上诉",
+            "Infringement": "侵权", "infringement": "侵权", "Infringe": "侵权",
+            "Litigation": "诉讼", "litigation": "诉讼", "sue": "起诉",
+            "Settlement": "和解", "settlement": "和解", "negotiate": "协商",
+            "Damages": "赔偿", "damages": "赔偿", "compensation": "赔偿",
+            "License": "许可", "license": "许可", "licensing": "许可",
+            "Application": "申请", "application": "申请", "apply": "申请",
+            "Examination": "审查", "examination": "审查", "examining": "审查",
+            "Grant": "授权", "grant": "授权", "granted": "授权",
+            "Validity": "有效性", "validity": "有效性", "invalid": "无效",
+            "Claim": "权利要求", "claim": "权利要求", "claims": "权利要求",
+            "Specification": "说明书", "specification": "说明书",
+            "Prior Art": "现有技术", "prior art": "现有技术",
+            "intellectual property": "知识产权", "IP": "知识产权",
+            "Trade Secret": "商业秘密", "trade secret": "商业秘密",
+            "Antitrust": "反垄断", "antitrust": "反垄断", "monopoly": "垄断",
+            "Registration": "注册", "registration": "注册", "registered": "已注册",
+            "Renewal": "续展", "renewal": "续展", "expire": "到期",
+            "Office": "局", "office action": "审查意见", "action": "审查意见",
+            "Petition": "请愿", "petition": "请愿", "request": "请求",
+            "Inter Partes Review": "双方复审", "IPR": "双方复审",
+            "Post-Grant": "授权后", "preissuance": "授权前",
         }
 
         items_html = ""
         links_data = []  # 收集链接数据用于生成汇总页面
 
-        for news in all_remaining[:15]:
+        # 优先使用 last30days-cn 的内容（更新的资讯），放在前面
+        digest_news = [n for n in all_remaining if n.get("_extra_cat")]
+        crawler_news = [n for n in all_remaining if not n.get("_extra_cat")]
+        # 混合：digest_items 8条 + crawler items 7条
+        display_news = digest_news[:8] + crawler_news[:7]
+
+        for news in display_news:
             title = news["title"]
             source = news.get("source", "")
             url = news.get("url", "")
-            cat = category_labels.get(news.get("category", ""), "综合")
+            # 优先使用 last30days-cn 的分类标签
+            extra_cat = news.get("_extra_cat", "")
+            cat = extra_cat if extra_cat else category_labels.get(news.get("category", ""), "综合")
 
             # 英文标题添加中文翻译
             en_chars = sum(1 for c in title if c.isascii() and c.isalpha())
@@ -414,10 +472,57 @@ function showToast() {{
 
             url = f"https://attoney.top/links/{filename}"
             logger.info(f"  链接汇总页面已保存: {filepath}")
+
+            # 清理旧文件（保留最近14天）
+            self._cleanup_old_links_files(save_dir, keep_days=14)
+
             return url
 
         except Exception as e:
             logger.error(f"  生成链接汇总页面失败: {e}")
+            return None
+
+    def _cleanup_old_links_files(self, save_dir, keep_days=14):
+        """清理旧的链接汇总页面文件"""
+        try:
+            if not os.path.exists(save_dir):
+                return
+            import re
+            cutoff = datetime.now().timestamp() - keep_days * 86400
+            count = 0
+            for fname in os.listdir(save_dir):
+                if not re.match(r"links_\d{8}\.html", fname):
+                    continue
+                fpath = os.path.join(save_dir, fname)
+                if os.path.getmtime(fpath) < cutoff:
+                    os.remove(fpath)
+                    count += 1
+            if count > 0:
+                logger.info(f"  清理过期链接文件: {count}个")
+        except Exception as e:
+            logger.warning(f"  清理旧链接文件失败: {e}")
+
+    def _find_hot_topic(self):
+        """使用 last30days-cn 搜索热点法律话题"""
+        try:
+            topic = self.hot_topic_finder.find_hot_topic()
+            if not topic:
+                return None
+
+            # 构造 news 格式
+            return {
+                "title": topic["title"],
+                "source": topic.get("source", "社交平台"),
+                "category": "hot_topic",
+                "region": "china",
+                "url": topic.get("url", ""),
+                "keywords": ["热点", "法律", topic.get("source", "")],
+                "images": [],
+                "_from_trending": True,
+                "_trending_data": topic,
+            }
+        except Exception as e:
+            logger.warning(f"搜索热点话题失败: {e}")
             return None
 
     def run(self):

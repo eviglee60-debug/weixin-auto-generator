@@ -33,34 +33,11 @@ class Config:
 
     # 新闻源配置
     NEWS_SOURCES = {
-        # === 国内官方源 ===
-        "cnipa": {
+        # === patent 专利类 ===
+        "cnipa_patent": {
             "name": "国家知识产权局",
             "url": "https://www.cnipa.gov.cn/",
             "category": "patent",
-            "region": "china",
-        },
-        "samr": {
-            "name": "市场监管总局",
-            "url": "https://www.samr.gov.cn/xw/mtjj/index.html",
-            "api_url": "https://www.samr.gov.cn/api-gateway/jpaas-publish-server/front/page/build/unit",
-            "api_params": {
-                "parseType": "bulidstatic",
-                "webId": "29e9522dc89d4e088a953d8cede72f4c",
-                "tplSetId": "5c30fb89ae5e48b9aefe3cdf49853830",
-                "pageType": "column",
-                "tagId": "内容区域",
-                "editType": "null",
-                "pageId": "fd590d1789974f8b9f1db6d2e7da751a",
-            },
-            "category": "general_ip",
-            "region": "china",
-        },
-        "spc": {
-            "name": "最高人民法院",
-            "url": "https://www.court.gov.cn/zixun.html",
-            "base_url": "https://www.court.gov.cn",
-            "category": "hot_topic",
             "region": "china",
         },
         "spc_ip": {
@@ -70,7 +47,6 @@ class Config:
             "category": "patent",
             "region": "china",
         },
-        # === 国际源 ===
         "uspto": {
             "name": "美国专利商标局",
             "url": "https://www.uspto.gov/about-us/news-updates",
@@ -92,15 +68,78 @@ class Config:
         "tipo": {
             "name": "台湾智慧财产局",
             "url": "https://www.tipo.gov.tw/zh-tw/news.html",
+            "category": "patent",
+            "region": "international",
+        },
+        "fuqingtuang": {
+            "name": "赋青春",
+            "url": "https://www.cnipa.gov.cn/col/col1141/index.html",
+            "base_url": "https://www.cnipa.gov.cn",
+            "category": "patent",
+            "region": "china",
+        },
+        # === general_ip 泛知识产权类 ===
+        "samr": {
+            "name": "市场监管总局",
+            "url": "https://www.samr.gov.cn/xw/mtjj/index.html",
+            "api_url": "https://www.samr.gov.cn/api-gateway/jpaas-publish-server/front/page/build/unit",
+            "api_params": {
+                "parseType": "bulidstatic",
+                "webId": "29e9522dc89d4e088a953d8cede72f4c",
+                "tplSetId": "5c30fb89ae5e48b9aefe3cdf49853830",
+                "pageType": "column",
+                "tagId": "内容区域",
+                "editType": "null",
+                "pageId": "fd590d1789974f8b9f1db6d2e7da751a",
+            },
+            "category": "general_ip",
+            "region": "china",
+        },
+        "cnipa_general": {
+            "name": "国家知识产权局",
+            "url": "https://www.cnipa.gov.cn/",
+            "category": "general_ip",
+            "region": "china",
+        },
+        "tipo_general": {
+            "name": "台湾智慧财产局",
+            "url": "https://www.tipo.gov.tw/zh-tw/news.html",
             "category": "general_ip",
             "region": "international",
         },
-        # === 司法源 ===
+        # 一带一路联盟国家知识产权局
+        "saic": {
+            "name": "沙特知识产权局",
+            "url": "https://www.saip.gov.sa/en/news/",
+            "category": "general_ip",
+            "region": "international",
+        },
+        "myipo": {
+            "name": "马来西亚知识产权局",
+            "url": "https://www.mymipo.gov.my/news",
+            "category": "general_ip",
+            "region": "international",
+        },
+        # === hot_topic 热点法律类 ===
+        "spc": {
+            "name": "最高人民法院",
+            "url": "https://www.court.gov.cn/zixun.html",
+            "base_url": "https://www.court.gov.cn",
+            "category": "hot_topic",
+            "region": "china",
+        },
         "us_supreme": {
             "name": "美国最高法院",
             "url": "https://www.supremecourt.gov/opinions/slipopinion/25",
             "category": "hot_topic",
             "region": "international",
+        },
+        "high_court": {
+            "name": "高级人民法院",
+            "url": "https://www.chinacourt.org/article/index/coluId/5",
+            "base_url": "https://www.chinacourt.org",
+            "category": "hot_topic",
+            "region": "china",
         },
     }
 
