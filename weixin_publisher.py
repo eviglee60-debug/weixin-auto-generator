@@ -8,7 +8,7 @@ import tempfile
 logger = logging.getLogger(__name__)
 
 class WeixinPublisher:
-    def __init__(self):
+    def __init__(self, ai_generator=None):
         from config import Config
         self.appid = Config.WECHAT_APPID
         self.secret = Config.WECHAT_SECRET
@@ -16,6 +16,7 @@ class WeixinPublisher:
         self.access_token = None
         self.token_expires = 0
         self.default_thumb_media_id = None
+        self.ai_generator = ai_generator
         
     def get_access_token(self):
         try:
@@ -72,7 +73,7 @@ class WeixinPublisher:
             return None
 
     def create_thumb_for_article(self, title, index=0, category="general"):
-        """为指定文章创建封面"""
+        """为指定文章创建封面，优先使用AI生成，失败则回退到模板图"""
         try:
             access_token = self.get_access_token()
             if not access_token:
@@ -80,28 +81,52 @@ class WeixinPublisher:
 
             url = f"{self.base_url}/material/add_material?access_token={access_token}&type=thumb"
 
-            jpeg_data = self.create_simple_jpeg(title=title, index=index, category=category)
+            jpeg_data = None
+            # 优先使用 AI 生成封面
+            if self.ai_generator:
+                try:
+                    ai_image = self.ai_generator.generate_cover_image(title, category)
+                    if ai_image and len(ai_image) > 1000:
+                        jpeg_data = ai_image
+                        logger.info(f"AI封面生成成功: {title}")
+                except Exception as e:
+                    logger.warning(f"AI封面生成失败，回退模板: {e}")
 
+            # 回退到模板图
+            if not jpeg_data:
+                jpeg_data = self.create_simple_jpeg(title=title, index=index, category=category)
+
+            media_id = self._upload_jpeg_to_weixin(jpeg_data, url, "thumb.jpg")
+            if media_id:
+                logger.info(f"文章封面上传成功: {title}")
+            return media_id
+
+        except Exception as e:
+            logger.error(f"创建文章封面异常: {e}")
+            return None
+
+    def _upload_jpeg_to_weixin(self, jpeg_data, url, filename="image.jpg"):
+        """上传 JPEG 字节数据到微信素材库"""
+        try:
+            import os
             with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
                 tmp.write(jpeg_data)
                 tmp_path = tmp.name
 
             with open(tmp_path, 'rb') as f:
-                files = {'media': ('thumb.jpg', f, 'image/jpeg')}
+                files = {'media': (filename, f, 'image/jpeg')}
                 response = requests.post(url, files=files, timeout=30)
 
             os.unlink(tmp_path)
 
             if response.status_code == 200:
                 data = response.json()
-                if "media_id" in data:
-                    logger.info(f"文章封面上传成功: {title}")
-                    return data["media_id"]
-
-            return None
-
+                return data.get("media_id")
+            else:
+                logger.error(f"上传图片失败: {response.status_code} - {response.text[:200]}")
+                return None
         except Exception as e:
-            logger.error(f"创建文章封面异常: {e}")
+            logger.error(f"上传图片异常: {e}")
             return None
     
     def create_simple_jpeg(self, title="", index=0, category="general"):

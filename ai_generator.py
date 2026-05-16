@@ -185,12 +185,13 @@ class AIGenerator:
 
     def _call_llm(self, prompt):
         """调用 MiniMax LLM"""
+        from config import Config
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_key}"
         }
         data = {
-            "model": "MiniMax-M2.7",
+            "model": Config.MINIMAX_MODEL,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.8,
             "max_tokens": 16384
@@ -212,9 +213,6 @@ class AIGenerator:
                         if "message" in choice:
                             msg = choice["message"]
                             content = msg.get("content", "")
-                            # MiniMax 偶尔把内容放在 reasoning_content 中
-                            if not content or len(content.strip()) < 50:
-                                content = msg.get("reasoning_content", "")
 
                     logger.info(f"生成内容长度: {len(content) if content else 0}")
 
@@ -277,7 +275,15 @@ class AIGenerator:
             title = re.sub(r'[一二三四五六七八九〇○零]{2,4}年', '', title)
 
             # 去掉破折号/冒号后面的冗余描述（保留冒号前的主标题）
-            title = re.split(r'[——:：]', title)[0]
+            # 但如果冒号前太短（如缩写），则保留冒号后部分合并
+            parts = re.split(r'[——:：]', title, maxsplit=1)
+            if len(parts) > 1 and len(parts[0]) >= 6:
+                title = parts[0]
+            elif len(parts) > 1 and len(parts[0]) < 6:
+                # 冒号前太短（如"USPTO"），合并前后
+                title = f"{parts[0]} {parts[1]}" if len(parts[1]) > 4 else parts[1]
+            else:
+                title = parts[0]
 
             # 只去掉明确的冗余后缀，保留核心内容
             for suffix in ["在京举办", "在京举行", "发布会举行", "活动举行"]:
@@ -320,15 +326,15 @@ class AIGenerator:
             return "知识产权新动态"
 
     def generate_digest(self, content):
-        """生成摘要：18个汉字以内，无符号"""
+        """生成摘要：54个汉字以内（微信限制120字节，UTF-8每汉字3字节≈40汉字，留余量取54字符）"""
         try:
             text = re.sub(r'<[^>]+>', '', content)
             text = text.replace('\n', ' ').strip()
             text = re.sub(r'[\U0001F000-\U0001F9FF]', '', text)
             text = re.sub(r'[^一-龥a-zA-Z0-9]', '', text)
 
-            if len(text) > 18:
-                text = text[:18]
+            if len(text) > 54:
+                text = text[:54]
 
             return text if text else "知识产权行业最新动态"
 
@@ -336,8 +342,313 @@ class AIGenerator:
             logger.error(f"生成摘要失败: {e}")
             return "知识产权行业最新动态"
 
+    def generate_digest_summaries(self, items, max_chars=120):
+        """为多条新闻标题批量生成简短摘要（每条≤max_chars字）。
+
+        Args:
+            items: [{"title": str, "source": str}, ...] 最多20条
+            max_chars: 每条摘要最大字数
+
+        Returns:
+            [str] 与 items 等长的摘要列表，失败时返回空列表
+        """
+        if not items:
+            return []
+
+        titles_text = "\n".join(
+            f"{i+1}. [{it.get('source', '')}] {it['title']}"
+            for i, it in enumerate(items)
+        )
+
+        prompt = f"""你是一位知识产权新闻编辑。请为以下每条新闻撰写一句简短摘要（≤{max_chars}字），说清楚发生了什么。
+只输出编号和摘要，格式如"1. 摘要内容"，每条一行，不要其他文字。
+
+{titles_text}"""
+
+        content = self._call_llm_mini(prompt, max_tokens=2048)
+        if not content:
+            return []
+
+        summaries = []
+        for i, item in enumerate(items):
+            # 匹配 "数字. 摘要" 格式
+            import re
+            pattern = rf'{i+1}\.\s*(.+?)(?:\n|$)'
+            match = re.search(pattern, content)
+            if match:
+                summary = match.group(1).strip()
+                if len(summary) > max_chars:
+                    summary = summary[:max_chars]
+                summaries.append(summary)
+            else:
+                # 回退：截取标题
+                title = item.get("title", "")
+                summaries.append(title[:max_chars] if len(title) > max_chars else title)
+
+        return summaries
+
+    def _call_llm_mini(self, prompt, max_tokens=2048):
+        """轻量 LLM 调用，用于摘要等短任务"""
+        from config import Config
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}"
+        }
+        data = {
+            "model": Config.MINIMAX_MODEL,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.5,
+            "max_tokens": max_tokens
+        }
+
+        try:
+            logger.info(f"轻量LLM调用, max_tokens={max_tokens}")
+            response = requests.post(
+                self.api_url, headers=headers, json=data, timeout=60
+            )
+            if response.status_code == 200:
+                result = response.json()
+                if "choices" in result and len(result["choices"]) > 0:
+                    msg = result["choices"][0].get("message", {})
+                    return msg.get("content", "")
+        except Exception as e:
+            logger.error(f"轻量LLM调用失败: {e}")
+
+        return None
+
+    def generate_cover_image(self, title, category="general"):
+        """
+        调用 MiniMax Image-01 根据文章标题生成封面图，返回图片 bytes。
+
+        Args:
+            title: 文章标题，用于生成封面图 prompt
+            category: 文章类别 (patent/general_ip/hot_topic)
+
+        Returns:
+            图片 bytes (JPEG) 或 None（失败时）
+        """
+        from config import Config
+        import io
+
+        # 根据类别和标题构建 prompt
+        prompt = self._build_image_prompt(title, category)
+
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {Config.MINIMAX_API_KEY}"
+        }
+        # 微信封面推荐 900x383，MiniMax 要求高>=512，用 1280x512 生成后裁剪
+        data = {
+            "model": Config.MINIMAX_IMAGE_MODEL,
+            "prompt": prompt,
+            "width": 1280,
+            "height": 512,
+            "n": 1,
+            "response_format": "url",
+            "prompt_optimizer": True,
+        }
+
+        try:
+            logger.info(f"调用 MiniMax Image API 生成封面: {title[:30]}...")
+            resp = requests.post(
+                Config.MINIMAX_IMAGE_API_URL,
+                headers=headers,
+                json=data,
+                timeout=120
+            )
+            if resp.status_code == 200:
+                result = resp.json()
+                image_url = None
+                if "data" in result and result["data"]:
+                    image_url = result["data"][0].get("url", "")
+                elif "url" in result:
+                    image_url = result["url"]
+
+                if image_url:
+                    logger.info(f"封面图生成成功，下载中...")
+                    img_resp = requests.get(image_url, timeout=30)
+                    if img_resp.status_code == 200:
+                        # 转换为 JPEG 并调整尺寸到微信要求的 900x383
+                        from PIL import Image
+                        img = Image.open(io.BytesIO(img_resp.content))
+                        if img.mode in ('RGBA', 'P', 'LA'):
+                            background = Image.new('RGB', img.size, (255, 255, 255))
+                            if img.mode == 'P':
+                                img = img.convert('RGBA')
+                            background.paste(img, mask=img.split()[-1] if img.mode == 'RGBA' else None)
+                            img = background
+                        elif img.mode != 'RGB':
+                            img = img.convert('RGB')
+                        img = img.resize((900, 383), Image.LANCZOS)
+                        output = io.BytesIO()
+                        img.save(output, format='JPEG', quality=90)
+                        logger.info(f"封面图处理完成 (900x383 JPEG)")
+                        return output.getvalue()
+                    else:
+                        logger.error(f"下载封面图失败: HTTP {img_resp.status_code}")
+                else:
+                    logger.error(f"MiniMax 图片API未返回URL: {json.dumps(result, ensure_ascii=False)[:300]}")
+            else:
+                logger.error(f"MiniMax 图片API调用失败: {resp.status_code} - {resp.text[:300]}")
+        except Exception as e:
+            logger.error(f"生成封面图异常: {e}")
+
+        return None
+
+    def _build_image_prompt(self, title, category):
+        """根据文章类别和标题构建图片生成 prompt"""
+        # 类别风格指引
+        category_styles = {
+            "patent": "professional legal document style, blue and silver tones, technology innovation theme, clean modern design, intellectual property protection visual elements",
+            "general_ip": "balanced professional and modern style, orange and white tones, intellectual property law theme, scales of justice, clean layout",
+            "hot_topic": "eye-catching modern style, warm red and gold tones, breaking legal news theme, dynamic yet professional composition",
+        }
+        style = category_styles.get(category, category_styles["general_ip"])
+
+        # 清理标题，提取核心语义
+        import re
+        clean_title = re.sub(r'^(关注|解读|聚焦|速看|解析|深度|全球知产)', '', title)
+        clean_title = clean_title[:40]  # 限制长度
+
+        prompt = (
+            f"Chinese WeChat official account article cover image, 2.35:1 widescreen ratio. "
+            f"Topic: \"{clean_title}\". "
+            f"Style: {style}. "
+            f"Text-free or minimal abstract geometric design, suitable for professional legal/IP news. "
+            f"No small text, no chart, no photo of people. "
+            f"High quality, 4K, clean composition."
+        )
+        return prompt
+
     def clean_html(self, html_content):
         """清理HTML内容"""
         html_content = re.sub(r'```[a-zA-Z]*\n?', '', html_content)
         html_content = html_content.replace("```", "")
         return html_content.strip()
+
+    def coding_plan_search(self, query, max_tokens=8192):
+        """
+        调用 coding-plan-search 模型（独立端点）。
+
+        Args:
+            query: 搜索查询内容
+            max_tokens: 最大令牌数
+
+        Returns:
+            搜索结果字典，包含 organic 结果列表，失败返回 None
+        """
+        try:
+            from config import Config
+            import requests as req
+
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {Config.MINIMAX_API_KEY}"
+            }
+            data = {"q": query}
+
+            response = req.post(
+                "https://api.minimaxi.com/v1/coding_plan/search",
+                headers=headers,
+                json=data,
+                timeout=60
+            )
+
+            if response.status_code == 200:
+                result = response.json()
+                if "organic" in result:
+                    logger.info(f"coding-plan-search 成功，返回 {len(result['organic'])} 条结果")
+                    return result
+                elif "base_resp" in result:
+                    logger.error(f"coding-plan-search API错误: {result['base_resp']}")
+            else:
+                logger.error(f"coding-plan-search 调用失败: {response.status_code} - {response.text}")
+
+        except Exception as e:
+            logger.error(f"coding-plan-search 异常: {e}")
+
+        return None
+
+    def coding_plan_vlm(self, image_url, prompt="描述这张图片的内容"):
+        """
+        调用 coding-plan-vlm 图片理解模型（独立端点）。
+
+        Args:
+            image_url: 图片 URL 或 data:image/png;base64,xxx 格式
+            prompt: 图片理解提示词
+
+        Returns:
+            图片描述文本，失败返回 None
+        """
+        try:
+            from config import Config
+            import requests as req
+
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {Config.MINIMAX_API_KEY}"
+            }
+            data = {
+                "prompt": prompt,
+                "image_url": image_url
+            }
+
+            response = req.post(
+                "https://api.minimaxi.com/v1/coding_plan/vlm",
+                headers=headers,
+                json=data,
+                timeout=120
+            )
+
+            if response.status_code == 200:
+                result = response.json()
+                if "content" in result:
+                    logger.info(f"coding-plan-vlm 成功")
+                    return result.get("content", "")
+                elif "base_resp" in result:
+                    logger.error(f"coding-plan-vlm API错误: {result['base_resp']}")
+            else:
+                logger.error(f"coding-plan-vlm 调用失败: {response.status_code} - {response.text}")
+
+        except Exception as e:
+            logger.error(f"coding-plan-vlm 异常: {e}")
+
+        return None
+
+    def coding_plan_vlm_image_understand(self, image_url, prompt="描述这张图片的内容"):
+        """
+        调用 coding-plan-vlm 图片理解（需通过 MCP 工具，不支持直接 API）。
+
+        注意：coding-plan-vlm 的图片理解必须通过 MCP 工具调用。
+        此方法记录调用方式，实际使用需要在 Claude Code 中通过 MCP 工具调用。
+
+        Args:
+            image_url: 图片 URL
+            prompt: 图片理解提示词
+
+        Returns:
+            None（需通过 MCP 工具 understand_image 调用）
+        """
+        logger.info(f"coding-plan-vlm 图片理解需通过 MCP 工具调用: image_url={image_url}, prompt={prompt}")
+        return None
+
+    def call_mcp_understand_image(self, image_url, prompt="描述这张图片的内容"):
+        """
+        通过本地 MCP 工具调用 coding-plan-vlm 的图片理解能力。
+
+        注意：MCP 采用 stdio 通信协议，需在 Claude Code 环境中使用。
+        直接调用会因 session 管理问题失败。
+
+        在 Claude Code 中可通过以下方式使用：
+          from mcp import Client
+          # 使用 MiniMax MCP 工具 understand_image
+
+        Args:
+            image_url: 图片 URL
+            prompt: 图片理解提示词
+
+        Returns:
+            None（需在 Claude Code MCP 环境中调用）
+        """
+        logger.info(f"coding-plan-vlm 图片理解需在 Claude Code MCP 环境中使用: image_url={image_url}")
+        return None

@@ -22,12 +22,20 @@ class NewsCrawler:
         }
         from config import Config
         self.sensitive_words = Config.SENSITIVE_WORDS
+        self.meeting_filter = Config.MEETING_FILTER_KEYWORDS
         self.sources = Config.NEWS_SOURCES
         self.seen_hashes = set()
 
     def contains_sensitive(self, text):
         """检查是否包含敏感词"""
         for word in self.sensitive_words:
+            if word in text:
+                return True
+        return False
+
+    def contains_meeting(self, text):
+        """检查是否为会议/活动类内容"""
+        for word in self.meeting_filter:
             if word in text:
                 return True
         return False
@@ -59,14 +67,15 @@ class NewsCrawler:
         self.seen_hashes = set()
         all_news = []
 
-        # 使用线程池并发爬取
-        with ThreadPoolExecutor(max_workers=8) as executor:
+        # 使用线程池并发爬取（I/O密集型任务，6线程）
+        max_workers = 6
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {}
             for source_id, source_cfg in self.sources.items():
                 future = executor.submit(self._crawl_source, source_id, source_cfg)
                 futures[future] = source_id
 
-            for future in as_completed(futures, timeout=30):
+            for future in as_completed(futures):
                 source_id = futures[future]
                 try:
                     news_list = future.result()
@@ -83,6 +92,8 @@ class NewsCrawler:
         for news in all_news:
             if self.contains_sensitive(news["title"]):
                 continue
+            if self.contains_meeting(news["title"]):
+                continue
             if self.is_duplicate(news["title"]):
                 continue
             if recent_keywords and self._is_similar_to_recent(news["title"], recent_keywords):
@@ -98,6 +109,25 @@ class NewsCrawler:
             cat = news.get("category", "hot_topic")
             if cat in grouped:
                 grouped[cat].append(news)
+
+        # 基于内容关键词的二次分类（补充泛知产内容）
+        # 泛知产关键词：商标、著作权、版权、商业秘密、不正当竞争、开源、数据合规
+        general_ip_keywords = ["商标", "著作权", "版权", "商业秘密", "不正当竞争", "开源", "数据合规",
+                              "反垄断", "反不正当竞争", "地理标志", "集成电路布图设计"]
+        # 从 patent 和 hot_topic 中移动符合条件的到 general_ip
+        additional_general_ip = []
+        for cat in ["patent", "hot_topic"]:
+            remaining = []
+            for news in grouped[cat]:
+                title = news.get("title", "")
+                if any(kw in title for kw in general_ip_keywords):
+                    news_copy = news.copy()
+                    news_copy["category"] = "general_ip"
+                    additional_general_ip.append(news_copy)
+                else:
+                    remaining.append(news)
+            grouped[cat] = remaining
+        grouped["general_ip"].extend(additional_general_ip)
 
         # 百度新闻兜底
         for cat in ["patent", "general_ip", "hot_topic"]:
@@ -369,7 +399,6 @@ class NewsCrawler:
                 '上一页', '导航', 'footer', 'header', 'menu',
                 'copyright', 'icp', '备案', '网站地图', 'contact us',
                 'patent basics', 'go to overview', 'search',
-                'filing', 'policy', 'about us', 'home',
             ]):
                 continue
             # 排除非新闻链接

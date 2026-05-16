@@ -12,15 +12,32 @@ class Database:
         self.user = Config.MYSQL_USER
         self.password = Config.MYSQL_PASSWORD
         self.db = Config.MYSQL_DB
+        self._conn = None
 
         self.init_db()
 
     def get_connection(self):
-        return pymysql.connect(
+        if self._conn is not None:
+            try:
+                self._conn.ping(reconnect=True)
+                return self._conn
+            except Exception:
+                self._conn = None
+        self._conn = pymysql.connect(
             host=self.host, port=self.port, user=self.user,
             password=self.password, database=self.db,
-            charset='utf8mb4', cursorclass=pymysql.cursors.DictCursor
+            charset='utf8mb4', cursorclass=pymysql.cursors.DictCursor,
+            autocommit=False
         )
+        return self._conn
+
+    def close(self):
+        if self._conn:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            self._conn = None
 
     def init_db(self):
         try:
@@ -70,7 +87,6 @@ class Database:
                 except Exception:
                     pass  # 字段已存在
             conn.commit()
-            conn.close()
             logger.info("数据库初始化成功")
         except Exception as e:
             logger.error(f"数据库初始化失败: {e}")
@@ -86,7 +102,6 @@ class Database:
                     (title, original_title or title, content, media_id, status, category, keywords)
                 )
             conn.commit()
-            conn.close()
             return True
         except Exception as e:
             logger.error(f"保存文章失败: {e}")
@@ -104,7 +119,6 @@ class Database:
                     (days,)
                 )
                 results = cursor.fetchall()
-            conn.close()
             return results
         except Exception as e:
             logger.error(f"查询最近文章失败: {e}")
@@ -146,7 +160,6 @@ class Database:
                         )
                     )
             conn.commit()
-            conn.close()
             return True
         except Exception as e:
             logger.error(f"保存待用新闻失败: {e}")
@@ -164,7 +177,6 @@ class Database:
                     (category, limit)
                 )
                 results = cursor.fetchall()
-            conn.close()
             return results
         except Exception as e:
             logger.error(f"获取待用新闻失败: {e}")
@@ -180,7 +192,6 @@ class Database:
                     (news_id,)
                 )
             conn.commit()
-            conn.close()
         except Exception as e:
             logger.error(f"标记待用新闻失败: {e}")
 
@@ -194,6 +205,5 @@ class Database:
                     (days,)
                 )
             conn.commit()
-            conn.close()
         except Exception as e:
             logger.error(f"清理待用新闻失败: {e}")

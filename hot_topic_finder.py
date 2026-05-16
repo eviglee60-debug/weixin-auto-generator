@@ -6,6 +6,7 @@ import os
 import re
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 logger = logging.getLogger(__name__)
 
@@ -183,10 +184,14 @@ class HotTopicFinder:
             hot_keywords = ["维权", "赔偿", "纠纷", "判决", "法院", "律师", "法律",
                             "诈骗", "投诉", "曝光", "揭秘", "消费者", "劳动", "工伤",
                             "房产", "婚姻", "继承", "交通", "医疗", "教育", "就业",
-                            "合同", "债务", "侵权", "假冒", "虚假", "违法", "处罚"]
-            hot_relevance = sum(1 for kw in hot_keywords if kw in text) * 3
+                            "合同", "债务", "侵权", "假冒", "虚假", "违法", "处罚",
+                            "监管", "合规", "维权", "受害者", "被告", "原告"]
+            hot_relevance = sum(1 for kw in hot_keywords if kw in text) * 4
 
-            final_score = score + engagement_score + hot_relevance
+            # 完整性检查：内容超过100字符的加分（说明有详细信息）
+            completeness = 1 if len(text) > 100 else 0
+
+            final_score = score + engagement_score + hot_relevance + completeness * 20
 
             item["_final_score"] = final_score
             filtered.append(item)
@@ -264,96 +269,138 @@ class HotTopicFinder:
             return []
 
         if not categories:
-            # 扩展搜索类别 - 覆盖用户关心的各类实用法律资讯
+            # 扩展搜索类别 - 覆盖用户关心的各类实用法律资讯 + 社会热点
+            # 确保知识产权相关内容占比超过1/3
             categories = [
-                # === 法律法规与政策 ===
-                {"query": "国务院 条例 规章 发布 实施", "label": "新规速递", "priority": 3},
-                {"query": "最高人民法院 司法解释 规定", "label": "司法解释", "priority": 3},
+                # === 知识产权法律法规与政策（8个）===
                 {"query": "知识产权 政策 办法 施行", "label": "知识产权新规", "priority": 3},
-                {"query": "市场监管 法规 公告", "label": "市场监管", "priority": 2},
-                # === 典型案例 ===
-                {"query": "最高人民法院 典型案例 指导性案例", "label": "最高院案例", "priority": 3},
-                {"query": "高级法院 典型案例 公布", "label": "高院案例", "priority": 2},
+                {"query": "专利法 实施细则 修改 发布", "label": "专利法新规", "priority": 3},
+                {"query": "商标法 修改 规定 发布", "label": "商标法新规", "priority": 3},
+                {"query": "著作权法 修改 施行", "label": "著作权法新规", "priority": 3},
                 {"query": "知识产权 侵权 赔偿 判决 典型", "label": "知产侵权案例", "priority": 3},
-                {"query": "反垄断 处罚 典型案例", "label": "反垄断案例", "priority": 2},
-                # === 流程与制度改革 ===
-                {"query": "法院 立案 改革 新规 流程", "label": "诉讼流程变化", "priority": 2},
                 {"query": "知识产权 申请 审查 变化 公告", "label": "知产流程变化", "priority": 3},
-                {"query": "专利 商标 审查 时限 调整", "label": "审查周期调整", "priority": 2},
-                # === 一带一路与国际 ===
-                {"query": "一带一路 投资 法律 合规 风险", "label": "一带一路", "priority": 3},
-                {"query": "跨境电商 法律 合规 案例", "label": "跨境电商", "priority": 2},
                 {"query": "海外知识产权 保护 纠纷 案例", "label": "海外知产保护", "priority": 3},
-                {"query": "WIPO EPO USPTO 最新 动态", "label": "国际知产动态", "priority": 2},
-                # === 社会热点法律问题 ===
+                {"query": "WIPO EPO USPTO 最新 动态", "label": "国际知产动态", "priority": 3},
+                # === 其他法律法规与政策（4个）===
+                {"query": "国务院 条例 规章 发布 实施", "label": "新规速递", "priority": 2},
+                {"query": "最高人民法院 司法解释 规定", "label": "司法解释", "priority": 2},
+                {"query": "市场监管 法规 公告", "label": "市场监管", "priority": 2},
+                {"query": "反垄断 处罚 典型案例", "label": "反垄断案例", "priority": 2},
+                # === 典型案例（4个）===
+                {"query": "最高人民法院 典型案例 指导性案例", "label": "最高院案例", "priority": 2},
+                {"query": "高级法院 典型案例 公布", "label": "高院案例", "priority": 2},
+                {"query": "法院 立案 改革 新规 流程", "label": "诉讼流程变化", "priority": 2},
+                {"query": "专利 商标 审查 时限 调整", "label": "审查周期调整", "priority": 2},
+                # === 一带一路与国际（2个）===
+                {"query": "一带一路 投资 法律 合规 风险", "label": "一带一路", "priority": 2},
+                {"query": "跨境电商 法律 合规 案例", "label": "跨境电商", "priority": 2},
+                # === 社会热点法律问题（6个）===
                 {"query": "消费者 权益 保护 典型案例", "label": "消费维权", "priority": 2},
                 {"query": "劳动纠纷 典型案例 判决", "label": "劳动纠纷", "priority": 2},
                 {"query": "个人信息保护 数据 法律 案例", "label": "数据合规", "priority": 2},
                 {"query": "平台经济 反垄断 监管 案例", "label": "平台监管", "priority": 2},
+                # === 普通老百姓关注的社会热点（6个）===
+                {"query": "食品安全 违规 处罚 热搜", "label": "食品安全", "priority": 1},
+                {"query": "教育 培训 退款 纠纷 曝光", "label": "教育维权", "priority": 1},
+                {"query": "医疗 美容 纠纷 投诉 热搜", "label": "医疗维权", "priority": 1},
+                {"query": "房价 楼盘 烂尾 维权 最新", "label": "房产维权", "priority": 1},
+                {"query": "网购 假货 投诉 维权 最新", "label": "网购维权", "priority": 1},
+                {"query": "旅游 出行 纠纷 维权 热搜", "label": "旅游维权", "priority": 1},
             ]
 
-        all_items = []
+        # 知识产权相关的标签（用于后续统计）
+        IP_LABELS = {"知识产权新规", "专利法新规", "商标法新规", "著作权法新规", "知产侵权案例",
+                     "知产流程变化", "海外知产保护", "国际知产动态"}
+
         seen_titles = set()
 
-        # 按优先级分组搜索，每类最多取3条
+        # 并发搜索，4线程
         priority_groups = {3: [], 2: [], 1: []}
-        for cat_info in categories:
-            query = cat_info["query"]
-            label = cat_info["label"]
-            priority = cat_info.get("priority", 2)
+        max_workers = min(4, len(categories))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(self._run_search, cat["query"], days): cat
+                for cat in categories
+            }
+            for future in as_completed(futures):
+                cat_info = futures[future]
+                label = cat_info["label"]
+                priority = cat_info.get("priority", 2)
+                try:
+                    result = future.result()
+                    if not result:
+                        continue
+                    cat_items = []
+                    for platform in HOT_PLATFORMS:
+                        for item in result.get(platform, []):
+                            text = item.get("text", "")
+                            url = item.get("url", "")
+                            if len(text.strip()) < 20:
+                                continue
+                            title = self._extract_title(text)
+                            if title in seen_titles:
+                                continue
+                            seen_titles.add(title)
+                            if self._should_skip(text):
+                                continue
+                            cat_items.append({
+                                "title": title,
+                                "source": self._platform_name(platform),
+                                "url": url,
+                                "category": label,
+                                "score": item.get("score", 0) + priority * 10,
+                            })
+                    cat_items.sort(key=lambda x: x["score"], reverse=True)
+                    for item in cat_items[:3]:
+                        priority_groups[priority].append(item)
+                except Exception as e:
+                    logger.warning(f"搜索 {label} 失败: {e}")
 
-            try:
-                result = self._run_search(query, days)
-                if not result:
-                    continue
-
-                # 收集结果
-                cat_items = []
-                for platform in HOT_PLATFORMS:
-                    items = result.get(platform, [])
-                    for item in items:
-                        text = item.get("text", "")
-                        url = item.get("url", "")
-
-                        # 跳过太短或重复的内容
-                        if len(text.strip()) < 20:
-                            continue
-
-                        title = self._extract_title(text)
-                        if title in seen_titles:
-                            continue
-                        seen_titles.add(title)
-
-                        # 跳过政治和低俗内容
-                        if self._should_skip(text):
-                            continue
-
-                        cat_items.append({
-                            "title": title,
-                            "source": self._platform_name(platform),
-                            "url": url,
-                            "category": label,
-                            "score": item.get("score", 0) + priority * 10,  # 优先级加权
-                        })
-
-                # 每类最多取3条，按分数排序
-                cat_items.sort(key=lambda x: x["score"], reverse=True)
-                for item in cat_items[:3]:
-                    priority_groups[priority].append(item)
-
-            except Exception as e:
-                logger.warning(f"搜索 {label} 失败: {e}")
-                continue
-
-        # 合并：高优先级6条 + 中优先级8条 + 低优先级6条，共20条
+        # 合并：IP内容(item_limit_per_priority, ip_target_ratio)保证知产占比
         import random
+        item_limit_per_priority = {3: 6, 2: 8, 1: 6}
+        ip_target_ratio = 1.0 / 3  # IP内容至少占1/3
+
+        ip_pool = {p: [it for it in priority_groups[p] if it.get("category") in IP_LABELS] for p in [3, 2, 1]}
+        non_ip_pool = {p: [it for it in priority_groups[p] if it.get("category") not in IP_LABELS] for p in [3, 2, 1]}
+
+        for p in [3, 2, 1]:
+            random.shuffle(ip_pool[p])
+            random.shuffle(non_ip_pool[p])
+
         result_items = []
+        total_ip = 0
         for priority in [3, 2, 1]:
-            items = priority_groups[priority]
-            random.shuffle(items)  # 打乱同优先级顺序避免单调
-            limit = 8 if priority == 2 else 6
-            for item in items[:limit]:
-                result_items.append(item)
+            limit = item_limit_per_priority.get(priority, 6)
+            # 取IP条目（不超过limit的2/3）
+            ip_limit = min(len(ip_pool[priority]), limit * 2 // 3)
+            taken_ip = ip_pool[priority][:ip_limit]
+            total_ip += len(taken_ip)
+            result_items.extend(taken_ip)
+            # 用非IP条目补足到limit
+            remaining = limit - len(taken_ip)
+            taken_non_ip = non_ip_pool[priority][:remaining]
+            result_items.extend(taken_non_ip)
+
+        # 如果IP内容仍不足1/3，用剩余IP替换尾部非IP
+        target_ip = max(int(len(result_items) * ip_target_ratio) + 1, total_ip)
+        if total_ip < target_ip:
+            deficit = target_ip - total_ip
+            # 收集所有未使用的IP条目
+            unused_ip = []
+            for p in [3, 2, 1]:
+                used_ip_titles = {it["title"] for it in result_items if it.get("category") in IP_LABELS}
+                for it in ip_pool[p]:
+                    if it["title"] not in used_ip_titles:
+                        unused_ip.append(it)
+            random.shuffle(unused_ip)
+            # 从后往前替换非IP条目
+            for i in range(len(result_items) - 1, -1, -1):
+                if deficit <= 0:
+                    break
+                if result_items[i].get("category") not in IP_LABELS and unused_ip:
+                    result_items[i] = unused_ip.pop(0)
+                    deficit -= 1
 
         return result_items[:20]
 

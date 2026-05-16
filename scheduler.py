@@ -36,7 +36,7 @@ class Scheduler:
     def __init__(self):
         self.crawler = NewsCrawler()
         self.generator = AIGenerator()
-        self.publisher = WeixinPublisher()
+        self.publisher = WeixinPublisher(ai_generator=self.generator)
         self.db = Database()
         self.image_manager = ImageManager()
         self.kb_client = KnowledgeClient()
@@ -259,6 +259,14 @@ class Scheduler:
         except Exception as e:
             logger.warning(f"  last30days-cn 搜索失败: {e}")
 
+        # 过滤会议/活动类内容
+        from config import Config
+        meeting_keywords = Config.MEETING_FILTER_KEYWORDS
+        all_remaining = [
+            n for n in all_remaining
+            if not any(kw in n.get("title", "") for kw in meeting_keywords)
+        ]
+
         if len(all_remaining) < 3:
             return None
 
@@ -314,8 +322,23 @@ class Scheduler:
         # 优先使用 last30days-cn 的内容（更新的资讯），放在前面
         digest_news = [n for n in all_remaining if n.get("_extra_cat")]
         crawler_news = [n for n in all_remaining if not n.get("_extra_cat")]
-        # 混合：digest_items 8条 + crawler items 7条
-        display_news = digest_news[:8] + crawler_news[:7]
+        # 混合：last30days 内容尽量多保留 + 爬虫内容补充，最多20条
+        display_news = (digest_news + crawler_news)[:20]
+
+        # 批量生成摘要（≤120字）
+        summaries = {}
+        try:
+            summary_items = [{"title": n["title"], "source": n.get("source", "")} for n in display_news]
+            summary_list = self.generator.generate_digest_summaries(summary_items)
+            if summary_list:
+                summaries = {
+                    n["title"]: summary_list[i]
+                    for i, n in enumerate(display_news)
+                    if i < len(summary_list) and summary_list[i]
+                }
+                logger.info(f"  批量摘要生成成功: {len(summaries)}条")
+        except Exception as e:
+            logger.warning(f"  批量摘要生成失败，使用标题: {e}")
 
         for news in display_news:
             title = news["title"]
@@ -348,9 +371,16 @@ class Scheduler:
             if url and url.startswith("http"):
                 link_html = f'<br><span style="color:#2980b9;font-size:12px;text-decoration:underline;">{url}</span>'
 
+            # 摘要
+            summary_text = summaries.get(news["title"], "")
+            summary_html = ""
+            if summary_text:
+                summary_html = f'<br><span style="color:#666;font-size:13px;">{summary_text}</span>'
+
             items_html += f'''<li style="margin-bottom:14px;line-height:1.8;">
 <span style="background:#e8f4f8;color:#2980b9;font-size:12px;padding:2px 6px;border-radius:3px;margin-right:6px;">{cat}</span>
 <strong style="color:#1a5276;">{title}</strong>
+{summary_html}
 <span style="color:#999;font-size:12px;margin-left:6px;">来源：{source}</span>
 {link_html}
 </li>
@@ -361,7 +391,7 @@ class Scheduler:
 
         readmore_hint = ""
 
-        content = f'''<p style="font-size:15px;color:#555;margin-bottom:20px;">今日知识产权领域更多资讯速览：</p>
+        content = f'''<p style="font-size:15px;color:#555;margin-bottom:20px;">今日知识产权领域热点速览：</p>
 <ul style="list-style:none;padding:0;font-size:14px;color:#333;">
 {items_html}
 </ul>
@@ -369,13 +399,13 @@ class Scheduler:
 <p style="font-size:12px;color:#999;margin-top:20px;text-align:right;">整理：律途IP圈 | {time.strftime("%Y-%m-%d")}</p>'''
 
         result = {
-            "title": f"今日知产速览 | {time.strftime('%m月%d日')}更多资讯",
-            "digest": f"今日知识产权领域{len(all_remaining)}条资讯速览",
+            "title": f"今日热点速览 | {time.strftime('%m月%d日')}更多资讯",
+            "digest": f"今日知识产权领域热点速览，{len(display_news)}条精选资讯",
             "content": content,
             "source": "律途IP圈",
             "author": "律途IP圈",
             "category": "hot_topic",
-            "keywords": "新闻速览,知识产权,资讯",
+            "keywords": "热点速览,知识产权,资讯",
         }
 
         if links_page_url:
@@ -409,7 +439,7 @@ class Scheduler:
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>今日知产速览 | {date_short}链接汇总</title>
+<title>今日热点速览 | {date_short}链接汇总</title>
 <style>
 * {{ margin: 0; padding: 0; box-sizing: border-box; }}
 body {{ font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #f5f7fa; padding: 16px; padding-bottom: 60px; }}
@@ -429,7 +459,7 @@ body {{ font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif
 </head>
 <body>
 <div class="header">
-    <h1>📋 今日知产速览 | {date_short}</h1>
+    <h1>📋 今日热点速览 | {date_short}</h1>
     <p>点击任意链接即可复制到剪贴板</p>
 </div>
 {links_html}

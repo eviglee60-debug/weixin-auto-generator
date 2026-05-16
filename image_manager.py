@@ -46,63 +46,161 @@ class ImageManager:
             return None
 
     def crawl_images_from_news(self, title, source, region="china"):
-        """从新闻源抓取相关图片"""
+        """从多个图片来源抓取相关图片"""
         images = []
 
-        try:
-            # 根据关键词生成搜索词 - 提取核心主题
-            keywords = self._extract_keywords(title)
-            search_query = " ".join(keywords[:3])
+        # 根据关键词生成搜索词
+        keywords = self._extract_keywords(title)
+        search_query = keywords[0] if keywords else title[:8]
 
-            # 使用百度图片搜索
-            url = "https://image.baidu.com/search/acjson"
-            params = {
-                "tn": "resultjson_com",
-                "word": search_query,
-                "pn": 0,
-                "rn": 10
-            }
+        # 尝试多个图片源
+        search_sources = [
+            ("百度图片", self._crawl_baidu_images),
+            ("必应图片", self._crawl_bing_images),
+            ("搜狗图片", self._crawl_sogou_images),
+        ]
 
-            response = requests.get(url, params=params, headers=self.headers, timeout=15)
-
-            if response.status_code == 200:
-                try:
-                    data = response.json()
-                    if "data" in data:
-                        for item in data["data"][:5]:
-                            if "thumbURL" in item:
-                                images.append({
-                                    "url": item["thumbURL"],
-                                    "width": item.get("thumbWidth", 300),
-                                    "height": item.get("thumbHeight", 200),
-                                    "title": item.get("fromPageTitle", title)
-                                })
-                except:
-                    pass
-
-            # 不再生成托底图，有多少返回多少
-            if not images:
-                logger.warning(f"  未找到相关图片")
-
-        except Exception as e:
-            logger.error(f"抓取图片失败: {e}")
+        for source_name, search_func in search_sources:
+            try:
+                found = search_func(search_query, title)
+                if found:
+                    images.extend(found)
+                    logger.info(f"  {source_name}找到{len(found)}张图片")
+                    if len(images) >= 3:
+                        break
+            except Exception as e:
+                logger.debug(f"  {source_name}搜索失败: {e}")
 
         return images[:3]  # 最多返回3张图
+
+    def _crawl_baidu_images(self, keyword, title):
+        """百度图片搜索"""
+        images = []
+        try:
+            url = "https://image.baidu.com/search/acjson"
+            params = {"tn": "resultjson_com", "word": keyword, "pn": 0, "rn": 10}
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+                "Referer": "https://image.baidu.com/"
+            }
+            resp = requests.get(url, params=params, headers=headers, timeout=15)
+            if resp.status_code == 200:
+                data = resp.json()
+                for item in data.get("data", [])[:5]:
+                    if item.get("thumbURL"):
+                        images.append({
+                            "url": item["thumbURL"],
+                            "width": item.get("thumbWidth", 300),
+                            "height": item.get("thumbHeight", 200),
+                            "title": item.get("fromPageTitle", title)
+                        })
+        except Exception as e:
+            logger.debug(f"百度图片搜索失败: {e}")
+        return images
+
+    def _crawl_bing_images(self, keyword, title):
+        """必应图片搜索"""
+        images = []
+        try:
+            url = "https://cn.bing.com/images/search"
+            params = {"q": keyword, "first": 0, "count": 10}
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+            }
+            resp = requests.get(url, params=params, headers=headers, timeout=15)
+            if resp.status_code == 200:
+                from bs4 import BeautifulSoup
+                soup = BeautifulSoup(resp.text, 'html.parser')
+                # 查找包含真实图片URL的img标签
+                for img in soup.find_all('img'):
+                    img_url = img.get('src') or img.get('data-src')
+                    if img_url and img_url.startswith('http') and 'bing.net' in img_url:
+                        images.append({
+                            "url": img_url,
+                            "width": 300,
+                            "height": 200,
+                            "title": title
+                        })
+                    # 也尝试从srcset获取
+                    srcset = img.get('srcset', '')
+                    if not img_url and srcset:
+                        parts = srcset.split(',')
+                        if parts:
+                            url_part = parts[0].split()[0]
+                            if url_part.startswith('http'):
+                                images.append({
+                                    "url": url_part,
+                                    "width": 300,
+                                    "height": 200,
+                                    "title": title
+                                })
+                # 额外从a标签的href中提取图片
+                for a in soup.find_all('a', href=True):
+                    href = a['href']
+                    if 'bing.net' in href and ('.jpg' in href or '.png' in href or '.jpeg' in href):
+                        img_url = href.split('?')[0]
+                        if img_url.startswith('http'):
+                            images.append({
+                                "url": img_url,
+                                "width": 300,
+                                "height": 200,
+                                "title": title
+                            })
+        except Exception as e:
+            logger.debug(f"必应图片搜索失败: {e}")
+        return images[:5]  # 去重并限制数量
+
+    def _crawl_sogou_images(self, keyword, title):
+        """搜狗图片搜索"""
+        images = []
+        try:
+            url = "https://pic.sogou.com/pics/json.jsp"
+            params = {"query": keyword, "st": 5, "size": 10}
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+            }
+            resp = requests.get(url, params=params, headers=headers, timeout=15)
+            if resp.status_code == 200:
+                data = resp.json()
+                for item in data.get("items", [])[:5]:
+                    if item.get("pic_url"):
+                        images.append({
+                            "url": item["pic_url"],
+                            "width": item.get("width", 300),
+                            "height": item.get("height", 200),
+                            "title": item.get("title", title)
+                        })
+        except Exception as e:
+            logger.debug(f"搜狗图片搜索失败: {e}")
+        return images
 
     def _extract_keywords(self, title):
         """从标题提取关键词 - 提取核心主题用于图片搜索"""
         import re
-        # 移除常见前缀
-        title = re.sub(r'^(关注|解读|聚焦|速看|解析|深度)', '', title)
-        # 提取中文词组（2-6个字）
-        words = re.findall(r'[一-龥]{2,6}', title)
+        # 移除常见前缀和副词
+        title = re.sub(r'^(关注|解读|聚焦|速看|解析|深度|速递|重磅|关于)\s*', '', title)
+        title = re.sub(r'[-|——:：].*$', '', title)  # 移除破折号后内容
+        title = title.strip()
+
+        # 如果剩余标题较短，直接返回
+        if len(title) <= 10:
+            return [title] if title else ["法律"]
+
+        # 提取核心名词词组（3-8字）
+        words = re.findall(r'[一-龥]{3,8}', title)
+
         # 去掉太通用的词
-        generic_words = ["知识产权", "法律", "分析", "解读", "关注", "聚焦", "速看", "解析"]
-        keywords = [w for w in words if w not in generic_words]
-        # 如果关键词太少，保留原始词
-        if len(keywords) < 2:
-            keywords = words
-        return keywords[:4]
+        generic_words = {
+            "知识产权", "法律法规", "司法解释", "管理办法", "工作通知",
+            "保护运用", "风险管理", "最新修订", "海外知产", "典型案例"
+        }
+        keywords = [w for w in words if w not in generic_words and len(w) >= 3]
+
+        if keywords:
+            return keywords[:2]
+
+        # 如果没提取到，返回清洗后的标题作为搜索词
+        return [title[:8]] if title else ["法律"]
 
     def _generate_placeholder_images(self, title, keywords):
         """生成占位图片（当抓取失败时使用）"""
@@ -320,13 +418,15 @@ class ImageManager:
             if response.status_code != 200:
                 return None
 
-            # 验证是图片
-            content_type = response.headers.get('content-type', '')
-            if 'image' not in content_type and len(response.content) < 1000:
+            # 验证是图片（检查大小）
+            if len(response.content) < 1000:
                 return None
 
+            # 转换 WEBP 等格式为 JPEG
+            image_data = self._convert_to_jpeg(response.content)
+
             # 上传到微信
-            weixin_url = self.upload_image_to_weixin(response.content, filename)
+            weixin_url = self.upload_image_to_weixin(image_data, filename)
 
             if weixin_url:
                 self.image_cache[cache_key] = weixin_url
@@ -336,6 +436,29 @@ class ImageManager:
         except Exception as e:
             logger.error(f"下载上传图片失败: {e}")
             return None
+
+    def _convert_to_jpeg(self, image_data):
+        """将任意图片格式转换为 JPEG 格式"""
+        try:
+            from PIL import Image
+            import io
+            img = Image.open(io.BytesIO(image_data))
+            # 转换为 RGB 模式（微信要求 JPEG 为 RGB）
+            if img.mode in ('RGBA', 'P', 'LA'):
+                background = Image.new('RGB', img.size, (255, 255, 255))
+                if img.mode == 'P':
+                    img = img.convert('RGBA')
+                background.paste(img, mask=img.split()[-1] if img.mode == 'RGBA' else None)
+                img = background
+            elif img.mode != 'RGB':
+                img = img.convert('RGB')
+            # 保存为 JPEG
+            output = io.BytesIO()
+            img.save(output, format='JPEG', quality=85)
+            return output.getvalue()
+        except Exception as e:
+            logger.debug(f"图片格式转换失败: {e}")
+            return image_data  # 返回原始数据
 
     def process_article_images(self, content, title, source, region="china",
                                source_images=None, source_url=""):
@@ -359,21 +482,33 @@ class ImageManager:
             else:
                 logger.info(f"  无源文章图片")
 
-            # 不够则用百度图片搜索补充
+            # 不够则用百度图片搜索或生成占位图补充
             if len(image_urls) < 2:
                 need = 2 - len(image_urls)
-                logger.info(f"  百度搜图补充({need}张)...")
                 search_images = self.crawl_images_from_news(title, source, region)
-                for img in search_images[:need]:
-                    if img.get("data"):
-                        url = self.upload_image_to_weixin(img["data"], f"{title[:8]}_{len(image_urls)}.jpg")
-                    elif img.get("url"):
-                        url = self.download_and_upload_image(img["url"], f"news_{len(image_urls)}.jpg")
-                    else:
-                        continue
-                    if url:
-                        image_urls.append({"url": url, "source": "网络"})
-                        logger.info(f"  百度搜图上传成功")
+                if search_images:
+                    logger.info(f"  百度搜图补充({need}张)...")
+                    for img in search_images[:need]:
+                        if img.get("data"):
+                            url = self.upload_image_to_weixin(img["data"], f"{title[:8]}_{len(image_urls)}.jpg")
+                        elif img.get("url"):
+                            url = self.download_and_upload_image(img["url"], f"news_{len(image_urls)}.jpg")
+                        else:
+                            continue
+                        if url:
+                            image_urls.append({"url": url, "source": "网络"})
+                            logger.info(f"  百度搜图上传成功")
+                else:
+                    # 百度搜图失败时生成占位图
+                    logger.info(f"  百度搜图失败，生成占位图({need}张)...")
+                    keywords = self._extract_keywords(title)
+                    for i in range(need):
+                        img_data = self._create_info_image(title, keywords[0] if keywords else "知识产权", ["数据图", "流程图", "要点图"][i % 3], i)
+                        if img_data:
+                            url = self.upload_image_to_weixin(img_data, f"generated_{i}.jpg")
+                            if url:
+                                image_urls.append({"url": url, "source": "律途IP圈生成"})
+                                logger.info(f"  占位图{i+1}上传成功")
 
             if not image_urls:
                 logger.warning(f"  无可用图片，返回原文")

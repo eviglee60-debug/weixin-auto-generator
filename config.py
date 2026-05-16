@@ -10,6 +10,18 @@ class Config:
 
     MINIMAX_API_KEY = os.environ.get("MINIMAX_API_KEY")
     MINIMAX_API_URL = os.environ.get("MINIMAX_API_URL", "https://api.minimax.chat/v1/text/chatcompletion_v2")
+    MINIMAX_MODEL = os.environ.get("MINIMAX_MODEL", "MiniMax-M2.7")
+
+    # MiniMax Anthropic 兼容端点（用于 coding-plan 系列模型）
+    MINIMAX_API_BASE_URL = os.environ.get("MINIMAX_API_BASE_URL", "https://api.minimaxi.com/anthropic/v1")
+    # coding-plan-search 增强编程/分析能力
+    MINIMAX_CODING_PLAN_SEARCH = os.environ.get("MINIMAX_CODING_PLAN_SEARCH", "coding-plan-search")
+    # coding-plan-vlm 图片理解（需通过 MCP 工具调用，非直接 API）
+    MINIMAX_CODING_PLAN_VLM = os.environ.get("MINIMAX_CODING_PLAN_VLM", "coding-plan-vlm")
+
+    # MiniMax Image Generation API
+    MINIMAX_IMAGE_API_URL = os.environ.get("MINIMAX_IMAGE_API_URL", "https://api.minimaxi.com/v1/image_generation")
+    MINIMAX_IMAGE_MODEL = os.environ.get("MINIMAX_IMAGE_MODEL", "image-01")
 
     MYSQL_HOST = os.environ.get("MYSQL_HOST", "localhost")
     MYSQL_PORT = int(os.environ.get("MYSQL_PORT", 3306))
@@ -20,7 +32,7 @@ class Config:
     # 法律知识库 API
     LEGAL_AI_URL = os.environ.get("LEGAL_AI_URL", "http://127.0.0.1:8002")
 
-    SCHEDULE_HOUR = 8
+    SCHEDULE_HOUR = 5
     SCHEDULE_MINUTE = 0
     DAILY_ARTICLE_COUNT = 3
     LOG_DIR = "/opt/weixin-auto-generator/logs"
@@ -44,7 +56,7 @@ class Config:
             "name": "最高人民法院知识产权法庭",
             "url": "https://ipc.court.gov.cn/zh-cn/news/more-12-12.html",
             "base_url": "https://ipc.court.gov.cn",
-            "category": "patent",
+            "category": "patent",  # 主要算专利，但内容包含泛知产
             "region": "china",
         },
         "uspto": {
@@ -73,10 +85,24 @@ class Config:
         },
         "fuqingtuang": {
             "name": "赋青春",
-            "url": "https://www.cnipa.gov.cn/col/col1141/index.html",
-            "base_url": "https://www.cnipa.gov.cn",
+            "url": "https://weixin.sogou.com/weixin?type=1&s_from=input&query=赋青春&ie=utf8",
+            "base_url": "https://weixin.sogou.com",
             "category": "patent",
             "region": "china",
+        },
+        "spc_case_research": {
+            "name": "最高人民法院司法案例研究院",
+            "url": "https://weixin.sogou.com/weixin?type=1&s_from=input&query=最高人民法院司法案例研究院&ie=utf8",
+            "base_url": "https://weixin.sogou.com",
+            "category": "patent",
+            "region": "china",
+        },
+        "finnegan_cn": {
+            "name": "美国飞翰律师事务所",
+            "url": "https://weixin.sogou.com/weixin?type=1&s_from=input&query=美国飞翰律师事务所&ie=utf8",
+            "base_url": "https://weixin.sogou.com",
+            "category": "patent",
+            "region": "international",
         },
         # === general_ip 泛知识产权类 ===
         "samr": {
@@ -162,4 +188,98 @@ class Config:
         "机密", "绝密", "泄密",
         # 其他
         "反华", "辱华", "卖国", "汉奸", "间谍", "叛国",
+        # 国家领导人相关活动
+        "习近平", "李克强", "李强", "赵乐际", "王沪宁",
+        "蔡奇", "丁薛祥", "李希", "韩正", "刘鹤",
+        "胡锦涛", "温家宝",
     ]
+
+    # 会议/活动类过滤关键词 — 匹配则跳过
+    MEETING_FILTER_KEYWORDS = [
+        "主持召开", "学习贯彻", "精神传达", "重要讲话",
+        "主题教育", "党建", "党组", "党委中心组",
+        "大会开幕", "大会召开", "座谈会召开",
+        "调研考察", "视察", "出席活动",
+    ]
+
+    # ============================================================
+    # 实践画像 (Practice Profile)
+    # 参考 claude-for-legal CLAUDE.md 模式，定义此项目的实践偏好。
+    # 所有技能（生成/爬取/发布）从此读取，修改此处即全局生效。
+    # 编辑此文件，不需要重新部署。
+    # ============================================================
+
+    # --- 读者画像 ---
+    PRACTICE_READER = {
+        "primary": "企业知识产权管理者、法务人员",
+        "secondary": "知识产权从业者（代理人/律师/审查员）",
+        "level": "专业但不艰深 — 法务能决策，从业者能参考",
+    }
+
+    # --- 内容边界 ---
+    PRACTICE_CONTENT_SCOPE = {
+        "cover": [
+            "专利审查动态与趋势",
+            "商标/著作权侵权案例评析",
+            "知识产权政策法规解读",
+            "国际知产动态（USPTO/EPO/WIPO）",
+            "社会热点法律分析",
+        ],
+        "avoid": [
+            "纯政治内容（含会议报道/领导人活动）",
+            "公司公告类新闻（X公司获得X专利）",
+            "未经核实的传闻/猜测",
+            "涉及国家安全的敏感技术讨论",
+            "对其他律所/代理机构的评价",
+        ],
+    }
+
+    # --- 输出风格 ---
+    PRACTICE_OUTPUT_STYLE = {
+        "article_length": "800-1200字",
+        "tone": "专业但可读 — 像资深律师在茶余饭后做专业分享",
+        "structure": "事件背景 → 法律分析 → 法条解读 → 实务建议",
+        "citation_style": "引用法条注明法律名称+条款号（如《专利法》第22条）",
+        "digest_summary_length": "≤120字，说清楚发生了什么",
+        "digest_max_items": 20,
+    }
+
+    # --- 文章护栏 ---
+    PRACTICE_GUARDRAILS = {
+        # 引用出处层次
+        "provenance_tiers": [
+            ("官方来源", "CNIPA/USPTO/EPO/最高法 等官网获取"),
+            ("知识库引用", "本地 ChromaDB 法律知识库检索结果"),
+            ("AI 生成", "MiniMax 模型生成，需人工审查"),
+            ("待验证", "来源不明，发布前必须核实"),
+        ],
+        # Reviewer Note 模板（每篇文章生成后追加）
+        "reviewer_note_template": (
+            "> **审查者注释**\n"
+            "> - **来源:** {sources}\n"
+            "> - **法条引用:** {citation_count} 处，{verified_count} 处已核\n"
+            "> - **标记审查:** {review_flags} 处 `[review]`\n"
+            "> - **发布前:** {before_publish}"
+        ),
+    }
+
+    # --- 发布决策姿态 ---
+    PRACTICE_PUBLISH_POSTURE = {
+        "mode": "conservative",  # aggressive / measured / conservative
+        "auto_publish": False,   # 不自动发布 — 所有文章存入草稿箱
+        "requires_review": True, # 发布前需人工审查
+        "escalation_triggers": [
+            "涉及未决诉讼的评论",
+            "对现行政策的批评性分析",
+            "引用未经核实的第三方数据",
+            "涉及知名企业的侵权指控",
+        ],
+    }
+
+    # --- 选题优先级 ---
+    PRACTICE_TOPIC_PRIORITY = {
+        "patent": 10,       # 最高 — 核心领域
+        "general_ip": 8,
+        "hot_topic": 6,
+        "international": 5,
+    }
