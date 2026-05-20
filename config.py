@@ -19,9 +19,10 @@ class Config:
     # coding-plan-vlm 图片理解（需通过 MCP 工具调用，非直接 API）
     MINIMAX_CODING_PLAN_VLM = os.environ.get("MINIMAX_CODING_PLAN_VLM", "coding-plan-vlm")
 
-    # MiniMax Image Generation API
-    MINIMAX_IMAGE_API_URL = os.environ.get("MINIMAX_IMAGE_API_URL", "https://api.minimaxi.com/v1/image_generation")
-    MINIMAX_IMAGE_MODEL = os.environ.get("MINIMAX_IMAGE_MODEL", "image-01")
+    # Unsplash API (封面图 + 正文配图)
+    UNSPLASH_ACCESS_KEY = os.environ.get("UNSPLASH_ACCESS_KEY", "HS7hQcHaHJpIoBdf4ZZ-8FKn2cC6TGZTZkjyMJjwhBU")
+    UNSPLASH_API_URL = "https://api.unsplash.com"
+    UNSPLASH_APPLICATION_ID = "953600"
 
     MYSQL_HOST = os.environ.get("MYSQL_HOST", "localhost")
     MYSQL_PORT = int(os.environ.get("MYSQL_PORT", 3306))
@@ -48,22 +49,42 @@ class Config:
         # === patent 专利类 ===
         "cnipa_patent": {
             "name": "国家知识产权局",
-            "url": "https://www.cnipa.gov.cn/",
+            "url": "https://www.cnipa.gov.cn/col/col75/index.html",
             "category": "patent",
             "region": "china",
+            # dataproxy API 参数（页面JS动态渲染，需通过API获取）
+            "api_url": "https://www.cnipa.gov.cn/module/web/jpage/dataproxy.jsp",
+            "api_params": {
+                "startrecord": 1,
+                "endrecord": 20,
+                "perpage": 20,
+                "col": 1,
+                "columnid": 75,
+                "webid": 1,
+                "unitid": 17035,
+            },
+        },
+        "spc_guide_cases": {
+            "name": "最高人民法院指导案例",
+            "url": "https://www.court.gov.cn/shenpan/gengduo/77.html",
+            "base_url": "https://www.court.gov.cn",
+            "category": "patent",
+            "region": "china",
+            "max_pages": 3,  # 爬取前3页挑选IP相关案例
+            "priority_boost": 20,
+        },
+        "uspto": {
+            "name": "美国专利商标局",
+            "url": "https://www.uspto.gov/ip-policy/patent-policy",
+            "category": "patent",
+            "region": "international",
         },
         "spc_ip": {
             "name": "最高人民法院知识产权法庭",
             "url": "https://ipc.court.gov.cn/zh-cn/news/more-12-12.html",
             "base_url": "https://ipc.court.gov.cn",
-            "category": "patent",  # 主要算专利，但内容包含泛知产
-            "region": "china",
-        },
-        "uspto": {
-            "name": "美国专利商标局",
-            "url": "https://www.uspto.gov/about-us/news-updates",
             "category": "patent",
-            "region": "international",
+            "region": "china",
         },
         "epo": {
             "name": "欧洲专利局",
@@ -196,10 +217,21 @@ class Config:
 
     # 会议/活动类过滤关键词 — 匹配则跳过
     MEETING_FILTER_KEYWORDS = [
+        # 党建/政治学习
         "主持召开", "学习贯彻", "精神传达", "重要讲话",
         "主题教育", "党建", "党组", "党委中心组",
+        "理论学习", "民主生活会", "组织生活会",
+        "党风廉政", "从严治党", "八项规定",
+        # 会议/活动
         "大会开幕", "大会召开", "座谈会召开",
         "调研考察", "视察", "出席活动",
+        "动员部署", "推进会议", "工作会议",
+        "选举", "换届", "干部任免",
+        # 党建宣传用语
+        "带头抓落实", "以上率下", "统筹协调", "攻坚克难",
+        "抓落实", "勇担当", "敢作为",
+        "三中全会", "四中全会", "五中全会",
+        "主题教育总结", "学习研讨",
     ]
 
     # ============================================================
@@ -241,7 +273,7 @@ class Config:
         "structure": "事件背景 → 法律分析 → 法条解读 → 实务建议",
         "citation_style": "引用法条注明法律名称+条款号（如《专利法》第22条）",
         "digest_summary_length": "≤120字，说清楚发生了什么",
-        "digest_max_items": 20,
+        "digest_max_items": 15,
     }
 
     # --- 文章护栏 ---

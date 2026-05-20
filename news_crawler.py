@@ -162,8 +162,11 @@ class NewsCrawler:
         """爬取单个源"""
         news_list = []
 
-        # SAMR 走专用 API
-        if source_id == "samr" and "api_url" in source_cfg:
+        if source_id == "spc_guide_cases":
+            items = self._crawl_spc_guide_cases(source_cfg)
+        elif source_id.startswith("cnipa") and "api_url" in source_cfg:
+            items = self._crawl_cnipa_api(source_cfg)
+        elif source_id == "samr" and "api_url" in source_cfg:
             items = self._crawl_samr_api(source_cfg)
         else:
             items = self._crawl_source_html(source_id, source_cfg)
@@ -201,7 +204,7 @@ class NewsCrawler:
 
                 if source_id in ("spc", "spc_ip"):
                     items = self._extract_spc_items(soup, base_url, source_id)
-                elif source_id == "cnipa":
+                elif source_id.startswith("cnipa"):
                     items = self._extract_cnipa_items(soup)
                 else:
                     items = self._extract_news_items(soup, source_id, base_url)
@@ -307,6 +310,45 @@ class NewsCrawler:
 
         return images
 
+    def _crawl_cnipa_api(self, source_cfg):
+        """国家知识产权局 - 通过 dataproxy.jsp API 获取 JS 渲染的列表内容"""
+        news_list = []
+        seen = set()
+        try:
+            resp = requests.get(
+                source_cfg["api_url"],
+                params=source_cfg["api_params"],
+                headers=self.headers,
+                timeout=15,
+                verify=False,
+            )
+            if resp.status_code != 200:
+                logger.warning(f"[cnipa] API HTTP {resp.status_code}")
+                return news_list
+
+            # 响应格式: <record><![CDATA[<li><a href="art/...">title</a><span>date</span></li>]]></record>
+            import re as regex
+            for match in regex.finditer(
+                r'<a\s+href="([^"]+)"[^>]*>([^<]+)</a>',
+                resp.text,
+            ):
+                href = match.group(1)
+                title = match.group(2).strip()
+                if len(title) < 8:
+                    continue
+                if not href.startswith("http"):
+                    href = "https://www.cnipa.gov.cn/" + href.lstrip("/")
+                title_key = hashlib.md5(title.encode()).hexdigest()
+                if title_key in seen:
+                    continue
+                seen.add(title_key)
+                news_list.append({"title": title, "url": href})
+
+            logger.info(f"[cnipa] API 获取到 {len(news_list)} 条新闻")
+        except Exception as e:
+            logger.error(f"[cnipa] API 爬取异常: {e}")
+        return news_list
+
     def _crawl_samr_api(self, source_cfg):
         """市场监管总局 - 通过API获取JS渲染内容"""
         news_list = []
@@ -334,7 +376,76 @@ class NewsCrawler:
             logger.debug(f"[samr] API请求失败: {e}")
         return news_list[:5]
 
-    def _extract_spc_items(self, soup, base_url, source_id):
+    def _crawl_spc_guide_cases(self, source_cfg):
+        """最高人民法院指导案例 - 多页爬取 + IP相关过滤"""
+        news_list = []
+        base_url = source_cfg.get("base_url", "https://www.court.gov.cn")
+        max_pages = source_cfg.get("max_pages", 3)
+        seen_urls = set()
+
+        # IP相关关键词（只选取知识产权类指导案例）
+        ip_keywords = [
+            "专利", "商标", "著作权", "版权", "不正当竞争", "商业秘密",
+            "知识产权", "植物新品种", "集成电路布图设计", "计算机软件",
+            "发明", "实用新型", "外观设计", "垄断", "技术秘密",
+        ]
+
+        for page_num in range(1, max_pages + 1):
+            if page_num == 1:
+                page_url = source_cfg["url"]
+            else:
+                page_url = f"{base_url}/shenpan/gengduo/77_{page_num}.html"
+
+            try:
+                logger.info(f"[spc_guide_cases] 爬取第{page_num}页: {page_url}")
+                resp = requests.get(page_url, headers=self.headers, timeout=15,
+                                   verify=False, allow_redirects=True)
+                if resp.status_code != 200:
+                    logger.warning(f"[spc_guide_cases] 第{page_num}页 HTTP {resp.status_code}")
+                    continue
+
+                resp.encoding = resp.apparent_encoding or 'utf-8'
+                soup = BeautifulSoup(resp.text, 'html.parser')
+
+                page_items = 0
+                for a in soup.find_all('a', href=True):
+                    href = a["href"]
+                    if "/shenpan/xiangqing/" not in href:
+                        continue
+
+                    # 优先取 title 属性（完整案由），否则取链接文本
+                    title = (a.get("title", "") or a.get_text(strip=True)).strip()
+                    if not title or len(title) < 10:
+                        continue
+
+                    # 补全URL
+                    if href.startswith("/"):
+                        href = base_url + href
+
+                    # URL去重
+                    if href in seen_urls:
+                        continue
+                    seen_urls.add(href)
+
+                    # IP相关性过滤
+                    if not any(kw in title for kw in ip_keywords):
+                        continue
+
+                    news_list.append({"title": title, "url": href})
+                    page_items += 1
+
+                logger.info(f"[spc_guide_cases] 第{page_num}页找到 {page_items} 条IP相关案例")
+
+                # 每页都会抓，凑够10条以上就停止翻页
+                if len(news_list) >= 10:
+                    break
+
+            except Exception as e:
+                logger.error(f"[spc_guide_cases] 第{page_num}页爬取异常: {e}")
+                continue
+
+        logger.info(f"[spc_guide_cases] 共获取 {len(news_list)} 条IP相关指导案例")
+        return news_list
         """最高人民法院 / 最高法IP庭 - 基于<a>标签title属性提取"""
         items = []
         seen_urls = set()
@@ -463,28 +574,56 @@ class NewsCrawler:
         return news_list
 
     def _priority_score(self, news):
-        """计算新闻优先级分数"""
+        """计算新闻优先级分数 — 奖励案例/法规/解读，惩罚会议/活动"""
         score = 0
+        title = news.get("title", "")
+        category = news.get("category", "")
+        source = news.get("source", "")
+
+        # 最高法指导案例 — 最高优先级
+        if "最高人民法院指导案例" in source:
+            score += 20
 
         # 官方源优先
         official_sources = [
             "国家知识产权局", "市场监管总局", "最高人民法院",
             "最高人民法院知识产权法庭", "美国专利商标局", "欧洲专利局",
         ]
-        if news.get("source", "") in official_sources:
+        if source in official_sources:
             score += 10
 
-        # 标题包含关键词加分
-        important_keywords = [
-            "判决", "裁定", "侵权", "保护", "新规", "修改", "发布",
-            "授权", "申请", "审查", "纠纷", "赔偿", "无效",
+        # 实质法律内容高分关键词（案例/法规/解读）
+        legal_keywords = [
+            "判决", "裁定", "案例", "典型", "指导性",
+            "侵权", "赔偿", "无效", "纠纷",
         ]
-        for kw in important_keywords:
-            if kw in news.get("title", ""):
+        for kw in legal_keywords:
+            if kw in title:
+                score += 4
+
+        # 法规/政策关键词
+        regulatory_keywords = [
+            "新规", "法规", "规章", "办法", "条例", "通知",
+            "解读", "修订", "修改", "发布",
+            "保护", "审查", "授权", "申请",
+        ]
+        for kw in regulatory_keywords:
+            if kw in title:
                 score += 2
 
+        # 会议/党建类关键词扣分（针对专利类文章）
+        if category == "patent":
+            meeting_signals = [
+                "会议", "座谈", "调研", "考察", "学习",
+                "讲话", "精神", "部署", "推进", "建设",
+                "党建", "党组", "党委", "带头", "抓落实",
+            ]
+            for kw in meeting_signals:
+                if kw in title:
+                    score -= 3
+
         # 标题长度适中加分
-        title_len = len(news.get("title", ""))
+        title_len = len(title)
         if 15 <= title_len <= 50:
             score += 3
 
