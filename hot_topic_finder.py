@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import requests
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -13,24 +14,48 @@ logger = logging.getLogger(__name__)
 # last30days-cn 技能路径
 SKILL_SCRIPT = os.path.expanduser("~/.claude/skills/last30days-cn/scripts/last30days.py")
 
-# 法律相关搜索关键词（按热度轮换，覆盖老百姓关注的各类法律热点）
+# 热点话题搜索关键词 — 覆盖四类大众话题 + 法律底色
+# 工具性目标：搜到有讨论量的热点，再用 LLM 打分筛选（>60分入选）
 LEGAL_SEARCH_QUERIES = [
-    "最新法律案例 热点",
-    "法院 判决 热门",
-    "法律 纠纷 热搜",
-    "维权 案例 最新",
-    "法律 解读 社会",
-    "消费 维权 案例",
-    "劳动 纠纷 判决",
-    "婚姻 继承 纠纷",
-    "房产 纠纷 案例",
-    "交通事故 赔偿 判决",
-    "网络 诈骗 维权",
-    "医患 纠纷 案例",
+    # === 八卦娱乐向：明星动态、影视热播、综艺爆点 ===
+    "明星 八卦 热搜 话题 讨论",
+    "热播剧 热议 讨论 剧情",
+    "综艺 节目 爆点 话题 热搜",
+    "娱乐圈 热点 新闻 讨论",
+    "网红 事件 热议 话题 热搜",
+    "影视 热映 讨论 票房 话题",
+    # === 时尚潮流向：穿搭/美妆/消费趋势 ===
+    "穿搭 潮流 趋势 热门 话题",
+    "美妆 护肤 新品 推荐 热门",
+    "消费 趋势 生活方式 热门",
+    "时尚 话题 讨论 热门 趋势",
+    # === 养生保健向：健康科普/饮食/慢病 ===
+    "健康 科普 养生 知识 热门",
+    "饮食 健康 营养 话题 热搜",
+    "慢性病 管理 保健 中老年",
+    "中老年 健康 养生 保健 话题",
+    # === 法律向：保持IP/法律底色 ===
+    "天价 赔偿 判决 案例",
+    "消费 维权 案例 最新",
+    "法律 热点 社会 话题",
+    "纠纷 案例 法律 解读",
+    "平台 监管 处罚 案例",
+    "个人信息 泄露 维权 判决",
+    "食品安全 违规 处罚 案例",
 ]
 
 # 热门平台关键词（用于筛选结果）
 HOT_PLATFORMS = ["weibo", "bilibili", "zhihu", "toutiao"]
+
+# 热点话题 LLM 评分 Prompt — 100分制，>60分入选
+HOTSPOT_SCORE_PROMPT = """对以下文章按100分制打分，标准：
+- 话题热度与流量潜力（微博/抖音/小红书是否在讨论，能否带来阅读量）：40分
+- 情绪触发（能引发共鸣/好奇/争议/讨论欲）：35分
+- 受众广度（老中青均可读懂）：15分
+- 不低俗即可（非色情暴力赌博吸毒）：10分（低俗则0分）
+注意：不需要考虑政治合规，只排除明显低俗内容。
+只返回分数和一句理由。
+格式: 分数|理由"""
 
 
 class HotTopicFinder:
@@ -40,49 +65,55 @@ class HotTopicFinder:
 
     def find_hot_topic(self, query=None, days=7):
         """
-        搜索热点法律话题，返回最适合做文章的话题。
+        搜索热点话题，最多尝试3个不同搜索词，直到找到>50分的热点。
 
         Returns:
             dict: {"title": str, "source": str, "url": str, "content": str, "score": int}
-            None: 如果未找到合适话题
+            None: 如果3次均未找到合适话题
         """
         if not self.available:
             logger.warning("last30days-cn 技能不可用")
             return None
 
-        # 选择搜索关键词
-        if not query:
-            query = self._select_query()
-
-        logger.info(f"搜索热点法律话题: {query}")
-
-        try:
-            # 调用 last30days-cn 技能
-            result = self._run_search(query, days)
-
-            if not result:
-                logger.warning("搜索无结果")
-                return None
-
-            # 分析结果，选择最佳话题
-            topic = self._select_best_topic(result, query)
-
-            if topic:
-                logger.info(f"发现热点话题: {topic['title'][:40]}... (score={topic.get('score', 0)})")
+        for attempt in range(3):
+            if attempt == 0 and query:
+                search_query = query
             else:
-                logger.info("未找到合适的热点话题")
+                search_query = self._select_query(attempt)
 
-            return topic
+            logger.info(f"搜索热点话题 (attempt {attempt+1}/3): {search_query}")
 
-        except Exception as e:
-            logger.error(f"搜索热点话题失败: {e}")
-            return None
+            try:
+                result = self._run_search(search_query, days)
+                if not result:
+                    logger.warning(f"  搜索无结果, 尝试下一个关键词")
+                    continue
 
-    def _select_query(self):
-        """轮换搜索关键词，避免重复"""
-        # 使用时间戳来轮换关键词
-        index = int(time.time()) % len(LEGAL_SEARCH_QUERIES)
-        return LEGAL_SEARCH_QUERIES[index]
+                topic = self._select_best_topic(result, search_query)
+                if topic:
+                    logger.info(f"发现热点话题: {topic['title'][:40]}... (score={topic.get('score', 0)})")
+                    return topic
+
+                logger.info(f"  未找到>50分话题, 尝试下一个关键词")
+            except Exception as e:
+                logger.warning(f"  搜索异常: {e}, 尝试下一个关键词")
+                continue
+
+        logger.info("3次搜索均未找到合适的热点话题")
+        return None
+
+    def _select_query(self, attempt=0):
+        """轮换搜索关键词 — 首次偏爱八卦/时尚/养生，重试保证不重复"""
+        t = int(time.time()) // 60  # 分钟级粒度
+        if attempt == 0:
+            # 优先从吸睛类中选取（八卦娱乐6 + 时尚潮流4 + 养生保健4 = 14个）
+            engaging = LEGAL_SEARCH_QUERIES[:14]
+            return engaging[t % len(engaging)]
+        else:
+            # 重试时全量轮换，素数偏移保证不同
+            primes = [11, 17]
+            offset = primes[(attempt - 1) % len(primes)]
+            return LEGAL_SEARCH_QUERIES[(t + offset) % len(LEGAL_SEARCH_QUERIES)]
 
     def _run_search(self, query, days=7):
         """执行 last30days-cn 搜索"""
@@ -132,7 +163,7 @@ class HotTopicFinder:
             return None
 
     def _select_best_topic(self, data, query):
-        """从搜索结果中选择最佳话题"""
+        """从搜索结果中选择最佳话题 — 关键词初筛 + LLM终评（>50分入选）"""
         all_items = []
 
         # 收集所有平台的结果
@@ -145,68 +176,88 @@ class HotTopicFinder:
         if not all_items:
             return None
 
-        # 过滤并选择最佳话题（老百姓关注、能用法律视角分析的热点）
+        # 硬性过滤 + 关键词初评
         filtered = []
         for item in all_items:
-            text = item.get("text", "")
-            title = item.get("text", "")[:100]
+            # 获取文本内容（优先 title，其次 description，最后 why_relevant）
+            text = item.get("title", "") or item.get("description", "") or item.get("why_relevant", "")
+            if not text or text == "-":
+                text = item.get("title", "")
 
             # 跳过太短或空的内容
-            if len(text.strip()) < 20:
+            if len(text.strip()) < 10:
                 continue
 
-            # 跳过纯广告或推广
-            if any(skip in text for skip in ["转发抽奖", "点击链接", "广告推广"]):
+            # 使用 _should_skip 进行硬性过滤
+            if self._should_skip(text):
                 continue
 
-            # 跳过政治敏感内容
-            political_keywords = ["总书记", "国家主席", "总理", "常委", "政治局", "中央", "国务院",
-                                  "党委", "党支部", "党员", "反动", "颠覆", "分裂", "抗议", "示威", "游行"]
-            if any(kw in text for kw in political_keywords):
-                continue
-
-            # 跳过低俗内容
-            vulgar_keywords = ["色情", "裸体", "性侵", "强奸", "卖淫", "嫖娼", "赌博", "毒品"]
-            if any(kw in text for kw in vulgar_keywords):
-                continue
-
-            # 计算综合分数
+            # 计算综合基础分数（关键词 + 互动）
             score = item.get("score", 0)
             engagement = item.get("engagement", {})
 
-            # 增加互动权重（老百姓爱看的内容互动高）
             likes = engagement.get("likes", 0)
             comments = engagement.get("num_comments", 0)
             reposts = engagement.get("reposts", 0)
             engagement_score = min(50, likes // 10 + comments * 3 + reposts * 2)
 
-            # 热点事件相关性（能用法律视角分析的关键词）
-            hot_keywords = ["维权", "赔偿", "纠纷", "判决", "法院", "律师", "法律",
-                            "诈骗", "投诉", "曝光", "揭秘", "消费者", "劳动", "工伤",
-                            "房产", "婚姻", "继承", "交通", "医疗", "教育", "就业",
-                            "合同", "债务", "侵权", "假冒", "虚假", "违法", "处罚",
-                            "监管", "合规", "维权", "受害者", "被告", "原告"]
-            hot_relevance = sum(1 for kw in hot_keywords if kw in text) * 4
+            # 四类话题关键词评分
+            hot_keywords = [
+                # 法律专业词（高权重 ×4）
+                "维权", "赔偿", "纠纷", "判决", "法院", "律师", "法律",
+                "诈骗", "消费者", "劳动", "工伤", "侵权", "违法", "处罚",
+                "监管", "合规", "受害者", "被告", "原告", "索赔", "起诉",
+                # 八卦娱乐词（中权重 ×3）
+                "明星", "热播", "综艺", "娱乐圈", "影视", "网红", "票房",
+                "八卦", "热议", "争议", "曝光", "揭秘", "反转", "天价",
+                # 时尚潮流词（中权重 ×3）
+                "穿搭", "美妆", "护肤", "时尚", "潮流", "新品", "消费趋势",
+                "生活方式", "种草", "测评",
+                # 养生保健词（中权重 ×3）
+                "健康", "养生", "饮食", "保健", "慢性病", "中老年", "营养",
+                "减肥", "睡眠", "运动",
+                # 通用场景词
+                "房产", "婚姻", "继承", "交通", "医疗", "教育", "就业",
+                "合同", "债务", "假冒", "虚假", "食品安全", "个人信息",
+            ]
+            legal_kw_count = sum(1 for kw in hot_keywords[:20] if kw in text)
+            hot_kw_count = sum(1 for kw in hot_keywords[20:] if kw in text)
+            hot_relevance = legal_kw_count * 4 + hot_kw_count * 3
 
-            # 完整性检查：内容超过100字符的加分（说明有详细信息）
-            completeness = 1 if len(text) > 100 else 0
+            completeness = 20 if len(text) > 100 else 0
 
-            final_score = score + engagement_score + hot_relevance + completeness * 20
-
+            final_score = score + engagement_score + hot_relevance + completeness
             item["_final_score"] = final_score
+            item["_text"] = text  # 保存提取的文本
             filtered.append(item)
 
         if not filtered:
             return None
 
-        # 按分数排序
+        # 按关键词分数排序，取前5名送LLM终评
         filtered.sort(key=lambda x: x["_final_score"], reverse=True)
+        candidates = filtered[:5]
 
-        # 选择最佳话题
-        best = filtered[0]
-        text = best.get("text", "")
+        # LLM 评分（>50分入选）
+        best = None
+        best_llm_score = 0
+        for candidate in candidates:
+            text = candidate.get("_text", "")
+            llm_score, llm_reason = self._score_with_llm(text)
+            if llm_score is None:
+                continue
+            candidate["_llm_score"] = llm_score
+            candidate["_llm_reason"] = llm_reason
+            logger.info(f"  LLM评分 {llm_score}/100: {text[:30]}... | {llm_reason}")
+            if llm_score >= 50 and llm_score > best_llm_score:
+                best = candidate
+                best_llm_score = llm_score
 
-        # 提取标题（前50个字符，找到合适的断句点）
+        if best is None:
+            logger.info("  LLM评分无>50分的候选话题，不替换")
+            return None
+
+        text = best.get("_text", "")
         title = self._extract_title(text)
 
         return {
@@ -214,10 +265,67 @@ class HotTopicFinder:
             "source": self._platform_name(best.get("_platform", "")),
             "url": best.get("url", ""),
             "content": text[:500],
-            "score": best.get("_final_score", 0),
+            "score": best_llm_score,
             "engagement": best.get("engagement", {}),
             "date": best.get("date", ""),
         }
+
+    def _score_with_llm(self, text):
+        """LLM评分热点话题 — 返回 (分数, 理由) 或 (None, None)"""
+        try:
+            from config import Config
+            payload = {
+                "model": Config.MINIMAX_MODEL,
+                "messages": [
+                    {"role": "user", "content": f"{HOTSPOT_SCORE_PROMPT}\n\n文章内容:\n{text[:500]}"}
+                ],
+                "temperature": 0.3,
+                "max_tokens": 512,  # 增加 tokens，避免 reasoning_content 消耗完
+            }
+            resp = requests.post(
+                Config.MINIMAX_API_URL,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {Config.MINIMAX_API_KEY}",
+                },
+                json=payload,
+                timeout=30,
+            )
+            if resp.status_code != 200:
+                logger.warning(f"  LLM评分请求失败: {resp.status_code}")
+                return None, None
+
+            result = resp.json()
+            content = ""
+            if "choices" in result and len(result["choices"]) > 0:
+                msg = result["choices"][0].get("message", {})
+                content = msg.get("content", "")
+                # 如果 content 为空，尝试从 reasoning_content 提取
+                if not content:
+                    reasoning = msg.get("reasoning_content", "")
+                    if reasoning:
+                        # 尝试从推理内容中提取分数
+                        score_match = re.search(r'(\d{1,3})\s*[分/]', reasoning)
+                        if score_match:
+                            score = int(score_match.group(1))
+                            # 提取理由（分数后面的内容）
+                            reason_start = reasoning.find(score_match.group(0))
+                            reason = reasoning[reason_start:reason_start+100] if reason_start >= 0 else ""
+                            return score, reason
+
+            if not content:
+                return None, None
+
+            # 解析 "分数|理由"
+            parts = content.strip().split("|", 1)
+            score_str = re.sub(r'[^\d]', '', parts[0])
+            score = int(score_str) if score_str else 0
+            reason = parts[1].strip() if len(parts) > 1 else ""
+            return score, reason
+
+        except Exception as e:
+            logger.warning(f"  LLM评分异常: {e}")
+            return None, None
 
     def _extract_title(self, text):
         """从文本中提取合适的标题"""
@@ -405,14 +513,23 @@ class HotTopicFinder:
         return result_items[:20]
 
     def _should_skip(self, text):
-        """检查是否应该跳过（政治敏感或低俗内容）"""
+        """硬性过滤：政治敏感 / 低俗色情 / 暴力 / 会议活动 / 无意义内容"""
         political_keywords = ["总书记", "国家主席", "总理", "常委", "政治局", "中央", "国务院",
-                              "党委", "党支部", "党员", "反动", "颠覆", "分裂", "抗议", "示威", "游行"]
-        vulgar_keywords = ["色情", "裸体", "性侵", "强奸", "卖淫", "嫖娼", "赌博", "毒品"]
+                              "党委", "党支部", "党员", "反动", "颠覆", "分裂", "抗议", "示威", "游行",
+                              "马英九", "台湾", "国民党", "民进党", "两岸"]  # 政治人物/事件
+        vulgar_keywords = ["色情", "裸体", "性侵", "强奸", "卖淫", "嫖娼", "赌博", "毒品",
+                           "暴力", "血腥", "恐怖", "自杀", "虐待"]
+        # 会议/活动类内容（不适合吸睛主题）
+        meeting_keywords = ["研讨会", "交流会", "论坛", "峰会", "座谈会", "发布会",
+                           "启动仪式", "开幕式", "闭幕式", "培训", "讲座", "宣讲"]
+        # 无意义/广告内容
+        skip_patterns = ["关于搜狗", "企业推广", "反馈", "点击链接", "转发抽奖", "广告推广",
+                        "corp.sogou.com", "sogou.com"]
 
-        for kw in political_keywords + vulgar_keywords:
+        for kw in political_keywords + vulgar_keywords + meeting_keywords + skip_patterns:
             if kw in text:
                 return True
+
         return False
 
 

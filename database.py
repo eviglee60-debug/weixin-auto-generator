@@ -141,6 +141,42 @@ class Database:
                         keywords.add(kw)
         return keywords
 
+    def get_recent_titles(self, days=30):
+        """获取最近已发布文章的标题集合（比对爬取主题）"""
+        try:
+            conn = self.get_connection()
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT original_title, title FROM articles "
+                    "WHERE created_at > DATE_SUB(NOW(), INTERVAL %s DAY)",
+                    (days,)
+                )
+                results = cursor.fetchall()
+            titles = set()
+            for row in results:
+                # 优先使用原始标题（爬取时的标题）
+                title = row.get("original_title") or row.get("title")
+                if title:
+                    titles.add(title)
+            return titles
+        except Exception as e:
+            logger.error(f"获取已发布标题失败: {e}")
+            return set()
+
+    def get_all_pending_titles(self):
+        """获取备选库中所有未使用文章的标题集合"""
+        try:
+            conn = self.get_connection()
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT title FROM pending_news WHERE used = FALSE"
+                )
+                results = cursor.fetchall()
+            return {row["title"] for row in results if row.get("title")}
+        except Exception as e:
+            logger.error(f"获取备选库标题失败: {e}")
+            return set()
+
     def save_pending_news(self, news_list):
         """存储未使用的新闻到待用队列"""
         try:

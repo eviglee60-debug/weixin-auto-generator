@@ -1,4 +1,4 @@
-"""调度器 - 每日3篇文章：专利法 + 泛知识产权 + 热点法律分析"""
+"""调度器 - 每日3篇文章：专利法 + 泛知识产权 + 热点吸睛内容"""
 
 import logging
 import time
@@ -48,45 +48,111 @@ class Scheduler:
             logger.info("开始每日文章生成任务")
             logger.info("=" * 60)
 
-            # 步骤1: 爬取新闻
-            logger.info("步骤1: 爬取多源新闻...")
-            recent_keywords = self.db.get_recent_keywords(days=Config.DEDUP_DAYS)
-            logger.info(f"最近{Config.DEDUP_DAYS}天已发布关键词: {len(recent_keywords)}个")
+            # ============================================================
+            # 步骤1: 获取已发布和已选用的标题集合（用于去重）
+            # ============================================================
+            logger.info("步骤1: 获取去重标题集合...")
+            recent_titles = self.db.get_recent_titles(days=Config.DEDUP_DAYS)
+            # 合并备选库中的标题（备选库文章可被选中，但需要去重）
+            pending_titles = self.db.get_all_pending_titles()
+            dedup_titles = set(recent_titles) | set(pending_titles)
+            logger.info(f"去重标题集合: 已发布{len(recent_titles)}个 + 备选库{len(pending_titles)}个 = {len(dedup_titles)}个")
 
-            grouped = self.crawler.crawl_all(recent_keywords=recent_keywords)
+            # ============================================================
+            # 步骤2: 爬取新闻（爬取阶段去重，比对爬取主题）
+            # ============================================================
+            logger.info("步骤2: 爬取多源新闻...")
+            grouped = self.crawler.crawl_all(recent_titles=dedup_titles)
+
+            # ============================================================
+            # 步骤3: 合并备选库文章（备选库文章可被选中，排序最高）
+            # ============================================================
+            logger.info("步骤3: 合并备选库文章...")
+            pending_ids_in_pool = set()
+            for cat in ["patent", "general_ip"]:
+                pending_articles = self.db.get_pending_news(cat, limit=20)
+                merged_count = 0
+                for pa in pending_articles:
+                    title = pa["title"]
+                    # 过滤公司公告
+                    if self.crawler._is_company_announcement(title):
+                        self.db.mark_used_pending(pa["id"])
+                        continue
+                    # 过滤纪念/讣告
+                    if self.crawler._is_memorial(title):
+                        self.db.mark_used_pending(pa["id"])
+                        continue
+                    # 避免与当日新爬取文章重复
+                    if any(n.get("title") == title for n in grouped.get(cat, [])):
+                        continue
+                    # 备选库文章插入到列表头部（排序最高）
+                    grouped[cat].insert(0, {
+                        "title": title,
+                        "source": pa.get("source", ""),
+                        "category": pa["category"],
+                        "region": pa.get("region", ""),
+                        "url": pa.get("url", ""),
+                        "keywords": pa.get("keywords", "").split(",") if pa.get("keywords") else [],
+                        "_from_pending": True,
+                        "_pending_id": pa["id"],
+                    })
+                    pending_ids_in_pool.add(pa["id"])
+                    merged_count += 1
+                if merged_count > 0:
+                    logger.info(f"  备选库合并 [{cat}]: {merged_count} 条（排序最高）")
 
             total_crawled = sum(len(v) for v in grouped.values())
-            logger.info(f"爬取结果: 专利={len(grouped.get('patent', []))}, "
-                        f"泛知产={len(grouped.get('general_ip', []))}, "
-                        f"热点={len(grouped.get('hot_topic', []))}")
+            logger.info(f"爬取结果(含备选库): 专利={len(grouped.get('patent', []))}, "
+                        f"泛知产={len(grouped.get('general_ip', []))}")
 
-            # 步骤2: 选择文章 + 待用队列
-            selected, pending = self.crawler.select_articles(grouped)
+            # ============================================================
+            # 步骤4: 选择文章1（专利）和文章2（泛知产）
+            # ============================================================
+            logger.info("步骤4: 选择文章...")
+            selected = []
 
-            # 存入待用队列
-            if pending:
-                self.db.save_pending_news(pending)
-                logger.info(f"存入待用队列: {len(pending)} 条")
+            # 文章1：专利领域
+            patent_news = grouped.get("patent", [])
+            if patent_news:
+                patent_news.sort(key=lambda x: self.crawler._priority_score(x), reverse=True)
+                selected.append(patent_news[0])
+                logger.info(f"  文章1(专利): {patent_news[0]['title'][:30]}...")
 
-            # 从待用队列补充不足的分类
-            for cat in Config.ARTICLE_CATEGORIES:
-                if not any(n.get("category") == cat for n in selected):
-                    pending_news = self.db.get_pending_news(cat, limit=3)
-                    for pn in pending_news:
-                        # 过滤公司公告
-                        if self.crawler._is_company_announcement(pn["title"]):
-                            self.db.mark_used_pending(pn["id"])
-                            continue
-                        selected.append({
-                            "title": pn["title"],
-                            "source": pn["source"],
-                            "category": pn["category"],
-                            "region": pn["region"],
-                            "url": pn.get("url", ""),
-                        })
-                        self.db.mark_used_pending(pn["id"])
-                        logger.info(f"从待用队列补充 [{cat}]: {pn['title']}")
-                        break
+            # 文章2：泛知产领域
+            general_ip_news = grouped.get("general_ip", [])
+            if general_ip_news:
+                general_ip_news.sort(key=lambda x: self.crawler._priority_score(x), reverse=True)
+                selected.append(general_ip_news[0])
+                logger.info(f"  文章2(泛知产): {general_ip_news[0]['title'][:30]}...")
+
+            # 标记被选中的待用队列文章为已用
+            for news in selected:
+                if news.get("_from_pending") and news.get("_pending_id"):
+                    self.db.mark_used_pending(news["_pending_id"])
+                    logger.info(f"  备选库文章被选用 [{news.get('category', '')}]: {news['title'][:30]}...")
+
+            # 未选中的文章存入备选库（仅当日新爬取的，已在库中的不重复存）
+            all_news_flat = []
+            for cat in ["patent", "general_ip"]:
+                for news in grouped.get(cat, []):
+                    if not any(n.get("title") == news.get("title") for n in selected):
+                        all_news_flat.append(news)
+            new_pending = [n for n in all_news_flat if not n.get("_from_pending")]
+            if new_pending:
+                self.db.save_pending_news(new_pending)
+                logger.info(f"存入备选库: {len(new_pending)} 条")
+
+            # ============================================================
+            # 步骤5: 从 last30days-cn 选材（文章3：热点吸睛内容）
+            # ============================================================
+            logger.info("步骤5: 从 last30days-cn 选材...")
+            hot_topic = self._find_hot_topic()
+            if hot_topic:
+                selected.append(hot_topic)
+                logger.info(f"  文章3(热点): {hot_topic['title'][:30]}...")
+            else:
+                logger.warning("  last30days-cn 未找到合适热点，跳过文章3")
+                # 不再从备选库补充低质量文章
 
             logger.info(f"最终选定 {len(selected)} 条新闻")
 
@@ -94,33 +160,20 @@ class Scheduler:
                 logger.error("未获取到任何新闻，任务终止")
                 return
 
-            # 步骤1.5: 用 last30days-cn 搜索热点法律话题，替换 hot_topic 文章
-            hot_topic = self._find_hot_topic()
-            if hot_topic:
-                # 替换 selected 中的 hot_topic 文章
-                for i, news in enumerate(selected):
-                    if news.get("category") == "hot_topic":
-                        selected[i] = hot_topic
-                        logger.info(f"  热点话题已替换: {hot_topic['title'][:30]}...")
-                        break
-                else:
-                    # 如果没有 hot_topic，替换最后一个
-                    if len(selected) >= Config.DAILY_ARTICLE_COUNT:
-                        selected[-1] = hot_topic
-                    else:
-                        selected.append(hot_topic)
-                    logger.info(f"  热点话题已添加: {hot_topic['title'][:30]}...")
-
-            # 补充源文章图片
-            logger.info("提取源文章配图...")
+            # ============================================================
+            # 步骤6: 补充源文章图片
+            # ============================================================
+            logger.info("步骤6: 提取源文章配图...")
             self.crawler.enrich_with_images(selected)
             for news in selected:
                 imgs = news.get("images", [])
                 if imgs:
                     logger.info(f"  [{news.get('source', '')}] {news['title'][:20]}... 获取到 {len(imgs)} 张源图")
 
-            # 步骤3: 生成文章
-            logger.info("步骤3: 生成文章...")
+            # ============================================================
+            # 步骤7: 生成文章
+            # ============================================================
+            logger.info("步骤7: 生成文章...")
             articles = []
 
             for i, news in enumerate(selected[:Config.DAILY_ARTICLE_COUNT]):
@@ -150,7 +203,7 @@ class Scheduler:
                 )
 
                 if content and len(content.strip()) > 100:
-                    short_title = self.generator.generate_title(title)
+                    short_title = self.generator.generate_title(title, category=category)
                     digest = self.generator.generate_digest(content)
 
                     # 处理配图
@@ -178,8 +231,8 @@ class Scheduler:
 
             logger.info(f"成功生成 {len(articles)} 篇文章")
 
-            # 步骤3.5: 生成新闻速览（第4篇）
-            digest_article = self._build_digest_article(grouped, selected, pending)
+            # 步骤7.5: 生成新闻速览（第4篇）
+            digest_article = self._build_digest_article(grouped, selected)
             if digest_article:
                 articles.append(digest_article)
                 logger.info(f"  新闻速览生成成功: {digest_article['title']}")
@@ -188,8 +241,10 @@ class Scheduler:
                 logger.error("没有成功生成的文章，任务终止")
                 return
 
-            # 步骤4: 创建草稿
-            logger.info("步骤4: 创建微信草稿...")
+            # ============================================================
+            # 步骤8: 创建草稿
+            # ============================================================
+            logger.info("步骤8: 创建微信草稿...")
             media_id = self.publisher.create_draft(articles)
 
             if media_id:
@@ -220,23 +275,18 @@ class Scheduler:
         except Exception as e:
             logger.error(f"任务执行异常: {e}", exc_info=True)
 
-    def _build_digest_article(self, grouped, selected, pending):
+    def _build_digest_article(self, grouped, selected):
         """将未选中的新闻整理为一篇新闻速览文章"""
         selected_titles = {n["title"] for n in selected}
 
         all_remaining = []
         seen = set()
-        for cat in ["patent", "general_ip", "hot_topic"]:
+        for cat in ["patent", "general_ip"]:
             for news in grouped.get(cat, []):
                 if news["title"] in selected_titles:
                     continue
                 if news["title"] in seen:
                     continue
-                seen.add(news["title"])
-                all_remaining.append(news)
-
-        for news in pending:
-            if news["title"] not in seen:
                 seen.add(news["title"])
                 all_remaining.append(news)
 
@@ -322,8 +372,8 @@ class Scheduler:
         # 优先使用 last30days-cn 的内容（更新的资讯），放在前面
         digest_news = [n for n in all_remaining if n.get("_extra_cat")]
         crawler_news = [n for n in all_remaining if not n.get("_extra_cat")]
-        # 混合：last30days 内容尽量多保留 + 爬虫内容补充，最多20条
-        display_news = (digest_news + crawler_news)[:20]
+        # 混合：last30days 内容尽量多保留 + 爬虫内容补充，最多15条
+        display_news = (digest_news + crawler_news)[:15]
 
         # 批量生成摘要（≤120字）
         summaries = {}
@@ -533,7 +583,7 @@ function showToast() {{
             logger.warning(f"  清理旧链接文件失败: {e}")
 
     def _find_hot_topic(self):
-        """使用 last30days-cn 搜索热点法律话题"""
+        """使用 last30days-cn 搜索热点话题（八卦/时尚/养生等吸睛内容）"""
         try:
             topic = self.hot_topic_finder.find_hot_topic()
             if not topic:
@@ -546,7 +596,7 @@ function showToast() {{
                 "category": "hot_topic",
                 "region": "china",
                 "url": topic.get("url", ""),
-                "keywords": ["热点", "法律", topic.get("source", "")],
+                "keywords": ["热点", "吸睛", topic.get("source", "")],
                 "images": [],
                 "_from_trending": True,
                 "_trending_data": topic,
@@ -556,10 +606,9 @@ function showToast() {{
             return None
 
     def run(self):
-        logger.info("启动调度器...")
-        schedule.every().day.at(
-            f"{Config.SCHEDULE_HOUR:02d}:{Config.SCHEDULE_MINUTE:02d}"
-        ).do(self.generate_and_publish)
+        logger.info("启动调度器，每日 02:00 和 06:00 执行...")
+        schedule.every().day.at("02:00").do(self.generate_and_publish)
+        schedule.every().day.at("06:00").do(self.generate_and_publish)
 
         logger.info("立即执行一次任务...")
         self.generate_and_publish()

@@ -33,7 +33,7 @@ class Config:
     # 法律知识库 API
     LEGAL_AI_URL = os.environ.get("LEGAL_AI_URL", "http://127.0.0.1:8002")
 
-    SCHEDULE_HOUR = 5
+    SCHEDULE_HOURS = [2, 6]  # 每天两次：凌晨2点和6点
     SCHEDULE_MINUTE = 0
     DAILY_ARTICLE_COUNT = 3
     LOG_DIR = "/opt/weixin-auto-generator/logs"
@@ -73,9 +73,34 @@ class Config:
             "max_pages": 3,  # 爬取前3页挑选IP相关案例
             "priority_boost": 20,
         },
-        "uspto": {
-            "name": "美国专利商标局",
-            "url": "https://www.uspto.gov/ip-policy/patent-policy",
+        "spc_gazette": {
+            "name": "最高人民法院公报",
+            "url": "https://www.court.gov.cn/fabu.html",
+            "base_url": "https://www.court.gov.cn",
+            "category": "patent",
+            "region": "china",
+            "max_pages": 2,  # 每栏目爬取前2页
+            "priority_boost": 30,  # 最高优先级
+            # 只爬取IP相关的栏目
+            "columns": [
+                "/fabu.html",
+                "/fabu/gengduo/16.html",  # 司法解释
+                "/fabu/gengduo/17.html",  # 司法文件
+                "/fabu/gengduo/22.html",  # 通知
+            ],
+        },
+        "uspto_federal_register": {
+            "name": "USPTO联邦公报",
+            # Federal Register RSS — 官方法规变更发布渠道，纯XML无需JS渲染
+            "rss_url": "https://www.federalregister.gov/agencies/patent-and-trademark-office.rss",
+            "category": "patent",
+            "region": "international",
+            "priority_boost": 5,
+        },
+        "patent_docs": {
+            "name": "Patent Docs",
+            # 业界知名专利博客，专注美国专利政策和法规解读
+            "rss_url": "https://www.patentdocs.org/atom.xml",
             "category": "patent",
             "region": "international",
         },
@@ -86,9 +111,9 @@ class Config:
             "category": "patent",
             "region": "china",
         },
-        "epo": {
+        "epo_rss": {
             "name": "欧洲专利局",
-            "url": "https://www.epo.org/news-events/news.html",
+            "rss_url": "https://www.epo.org/en/news-events/news/feed",
             "category": "patent",
             "region": "international",
         },
@@ -125,7 +150,7 @@ class Config:
             "category": "patent",
             "region": "international",
         },
-        # === general_ip 泛知识产权类 ===
+        # === general_ip 泛知识产权类（商标/版权/不正当竞争/商业秘密/娱乐法/数据法）===
         "samr": {
             "name": "市场监管总局",
             "url": "https://www.samr.gov.cn/xw/mtjj/index.html",
@@ -148,6 +173,20 @@ class Config:
             "category": "general_ip",
             "region": "china",
         },
+        "ncac": {
+            "name": "国家版权局",
+            "url": "http://www.ncac.gov.cn/chinacopyright/contents/12216/368476.html",
+            "base_url": "http://www.ncac.gov.cn",
+            "category": "general_ip",
+            "region": "china",
+        },
+        "ccpit": {
+            "name": "中国国际贸易促进委员会",
+            "url": "https://www.ccpit.org/a/cpzd/",
+            "base_url": "https://www.ccpit.org",
+            "category": "general_ip",
+            "region": "china",
+        },
         "tipo_general": {
             "name": "台湾智慧财产局",
             "url": "https://www.tipo.gov.tw/zh-tw/news.html",
@@ -167,25 +206,38 @@ class Config:
             "category": "general_ip",
             "region": "international",
         },
-        # === hot_topic 热点法律类 ===
-        "spc": {
-            "name": "最高人民法院",
-            "url": "https://www.court.gov.cn/zixun.html",
-            "base_url": "https://www.court.gov.cn",
-            "category": "hot_topic",
+        "wipo": {
+            "name": "世界知识产权组织",
+            "rss_url": "https://www.wipo.int/rss/zh/news.xml",
+            "category": "general_ip",
+            "region": "international",
+        },
+        "ip_specialist": {
+            "name": "知识产权专家",
+            "url": "https://weixin.sogou.com/weixin?type=1&s_from=input&query=知识产权&ie=utf8",
+            "base_url": "https://weixin.sogou.com",
+            "category": "general_ip",
             "region": "china",
         },
+        # === patent 补充 ===
         "us_supreme": {
             "name": "美国最高法院",
             "url": "https://www.supremecourt.gov/opinions/slipopinion/25",
-            "category": "hot_topic",
+            "category": "patent",  # PDF判例 → 专利法深度分析
             "region": "international",
+        },
+        "spc_news": {
+            "name": "最高人民法院",
+            "url": "https://www.court.gov.cn/zixun.html",
+            "base_url": "https://www.court.gov.cn",
+            "category": "patent",  # 法律新闻归入专利类
+            "region": "china",
         },
         "high_court": {
             "name": "高级人民法院",
             "url": "https://www.chinacourt.org/article/index/coluId/5",
             "base_url": "https://www.chinacourt.org",
-            "category": "hot_topic",
+            "category": "patent",  # 法律案例归入专利类
             "region": "china",
         },
     }
@@ -232,6 +284,25 @@ class Config:
         "抓落实", "勇担当", "敢作为",
         "三中全会", "四中全会", "五中全会",
         "主题教育总结", "学习研讨",
+        # === IP/知产类低价值活动/会议 ===
+        # 讲座/培训类
+        "讲座", "培训", "培训计划", "培训通知", "公益讲座",
+        "系列讲座", "专题讲座", "公开课",
+        # 研讨会/交流会
+        "研讨会", "交流会", "论坛", "峰会",
+        # 发布/启动类
+        "启动仪式", "开幕式", "闭幕式", "发布会举行",
+        "举办",  # "关于举办..." 是活动通知的典型模式
+        # 活动预告/议程
+        "活动预告", "议程", "计划安排", "工作安排",
+        # CNIPA 特有低价值内容
+        "专利文献馆", "文献馆", "公益讲座计划",
+        "政策宣讲", "宣讲会", "培训班",
+        "服务万里行",  # 知识产权服务万里行 — CNIPA年度活动
+        # 行政/督察类（纯行政通知，无法律分析价值）
+        "督察组", "进驻", "统计督察",
+        # 活动通知明显特征（不单独用"活动"以免误伤"反不正当竞争活动"等）
+        "活动的通知", "活动方案",  # 活动通知/活动方案 — 政府活动公告
     ]
 
     # ============================================================

@@ -2,6 +2,7 @@
 
 import requests
 from bs4 import BeautifulSoup
+import feedparser
 import logging
 import random
 import hashlib
@@ -52,17 +53,19 @@ class NewsCrawler:
         return False
 
     def extract_keywords(self, title):
-        """从标题提取关键词"""
+        """从标题提取关键词（先清洗干扰标点，避免智能引号等造成分块偏移）"""
         title = re.sub(r'^(关注|解读|聚焦|速看|解析|重磅|突发|最新)', '', title)
+        # 清除干扰标点：智能引号/中文引号/全角符号
+        title = re.sub(r'[“”‘’「」『』「」『』""'']', '', title)
         words = re.findall(r'[一-鿿]{2,8}', title)
         return words[:5]
 
-    def crawl_all(self, recent_keywords=None):
+    def crawl_all(self, recent_titles=None):
         """
         并发爬取所有源，返回按分类分组的新闻。
 
         Args:
-            recent_keywords: 最近已发布文章的关键词集合，用于去重
+            recent_titles: 最近已发布和已选用的文章标题集合，用于去重（比对爬取主题）
         """
         self.seen_hashes = set()
         all_news = []
@@ -87,7 +90,7 @@ class NewsCrawler:
                 except Exception as e:
                     logger.error(f"[{source_id}] 爬取异常: {e}")
 
-        # 过滤：敏感词 + 批次去重 + 历史去重 + 公司公告
+        # 过滤：敏感词 + 批次去重 + 历史去重（比对爬取主题）+ 公司公告
         filtered = []
         for news in all_news:
             if self.contains_sensitive(news["title"]):
@@ -96,9 +99,11 @@ class NewsCrawler:
                 continue
             if self.is_duplicate(news["title"]):
                 continue
-            if recent_keywords and self._is_similar_to_recent(news["title"], recent_keywords):
+            if recent_titles and self._is_similar_to_recent(news["title"], recent_titles):
                 continue
             if self._is_company_announcement(news["title"]):
+                continue
+            if self._is_memorial(news["title"]):
                 continue
             news["keywords"] = self.extract_keywords(news["title"])
             filtered.append(news)
@@ -128,6 +133,22 @@ class NewsCrawler:
                     remaining.append(news)
             grouped[cat] = remaining
         grouped["general_ip"].extend(additional_general_ip)
+
+        # 检查 general_ip 文章是否真的含IP关键词（非IP源如SAMR会混入食品/行政内容）
+        ip_check_kw = ["商标", "著作权", "版权", "商业秘密", "不正当竞争", "专利",
+                       "知识产权", "反垄断", "反不正当竞争", "地理标志", "集成电路",
+                       "侵权", "赔偿", "发明", "实用新型", "外观设计"]
+        legit_ip = []
+        for news in grouped["general_ip"]:
+            title = news.get("title", "")
+            if any(kw in title for kw in ip_check_kw):
+                legit_ip.append(news)
+            else:
+                # 不含IP关键词 → 移到 hot_topic（仍有可能是好内容，但不算泛知产）
+                news_copy = news.copy()
+                news_copy["category"] = "hot_topic"
+                grouped["hot_topic"].append(news_copy)
+        grouped["general_ip"] = legit_ip
 
         # 百度新闻兜底
         for cat in ["patent", "general_ip", "hot_topic"]:
@@ -164,10 +185,14 @@ class NewsCrawler:
 
         if source_id == "spc_guide_cases":
             items = self._crawl_spc_guide_cases(source_cfg)
+        elif source_id == "spc_gazette":
+            items = self._crawl_spc_gazette(source_cfg)
         elif source_id.startswith("cnipa") and "api_url" in source_cfg:
             items = self._crawl_cnipa_api(source_cfg)
         elif source_id == "samr" and "api_url" in source_cfg:
             items = self._crawl_samr_api(source_cfg)
+        elif "rss_url" in source_cfg:
+            items = self._crawl_rss(source_cfg)
         else:
             items = self._crawl_source_html(source_id, source_cfg)
 
@@ -376,6 +401,48 @@ class NewsCrawler:
             logger.debug(f"[samr] API请求失败: {e}")
         return news_list[:5]
 
+    def _crawl_rss(self, source_cfg):
+        """通过 RSS/Atom feed 爬取新闻源"""
+        news_list = []
+        rss_url = source_cfg.get("rss_url", "")
+        if not rss_url:
+            return news_list
+
+        try:
+            logger.info(f"[rss] 解析 feed: {rss_url}")
+            # 用 requests 先获取内容（使用爬虫UA，避免被Cloudflare拦截），
+            # 再用 feedparser 解析响应文本
+            resp = requests.get(rss_url, headers=self.headers, timeout=15, verify=False)
+            if resp.status_code != 200:
+                logger.warning(f"[rss] HTTP {resp.status_code}: {rss_url}")
+                return news_list
+
+            feed = feedparser.parse(resp.text)
+
+            if feed.bozo and not feed.entries:
+                logger.warning(f"[rss] feed 解析失败: {feed.bozo_exception}")
+                return news_list
+
+            entries = feed.entries[:10]  # 取最近10条
+            for entry in entries:
+                title = entry.get("title", "").strip()
+                link = entry.get("link", "").strip()
+
+                # 清理 HTML 标签
+                if re.search(r'<[^>]+>', title):
+                    title = re.sub(r'<[^>]+>', '', title)
+
+                if len(title) < 8:
+                    continue
+
+                news_list.append({"title": title, "url": link})
+
+            logger.info(f"[rss] {source_cfg.get('name')} 获取 {len(news_list)} 条")
+        except Exception as e:
+            logger.error(f"[rss] {rss_url} 爬取异常: {e}")
+
+        return news_list[:5]
+
     def _crawl_spc_guide_cases(self, source_cfg):
         """最高人民法院指导案例 - 多页爬取 + IP相关过滤"""
         news_list = []
@@ -446,6 +513,78 @@ class NewsCrawler:
 
         logger.info(f"[spc_guide_cases] 共获取 {len(news_list)} 条IP相关指导案例")
         return news_list
+
+    def _crawl_spc_gazette(self, source_cfg):
+        """最高人民法院公报 - 爬取 fabu.html 主站 + 司法解释/司法文件/通知等栏目页"""
+        news_list = []
+        base_url = source_cfg.get("base_url", "https://www.court.gov.cn")
+        max_pages = source_cfg.get("max_pages", 2)
+        columns = source_cfg.get("columns", [])
+        seen_urls = set()
+
+        ip_keywords = [
+            "专利", "商标", "著作权", "版权", "不正当竞争", "商业秘密",
+            "知识产权", "植物新品种", "集成电路布图设计", "计算机软件",
+            "发明", "实用新型", "外观设计", "垄断", "技术秘密",
+            "反不正当竞争", "反垄断", "数据", "信息网络",
+        ]
+
+        for col_path in columns:
+            pages = [col_path]
+            # 栏目列表页支持分页: /fabu/gengduo/16.html → /fabu/gengduo/16_2.html
+            if "/gengduo/" in col_path:
+                for p in range(2, max_pages + 1):
+                    pages.append(col_path.replace(".html", f"_{p}.html"))
+
+            for page_path in pages:
+                page_url = base_url + page_path
+                try:
+                    logger.info(f"[spc_gazette] 爬取: {page_url}")
+                    resp = requests.get(page_url, headers=self.headers, timeout=15,
+                                        verify=False, allow_redirects=True)
+                    if resp.status_code != 200:
+                        logger.warning(f"[spc_gazette] HTTP {resp.status_code}: {page_url}")
+                        continue
+
+                    resp.encoding = resp.apparent_encoding or 'utf-8'
+                    soup = BeautifulSoup(resp.text, 'html.parser')
+
+                    page_items = 0
+                    for a in soup.find_all('a', href=True):
+                        href = a["href"]
+                        if "xiangqing" not in href:
+                            continue
+
+                        title = (a.get("title", "") or a.get_text(strip=True)).strip()
+                        if not title or len(title) < 10:
+                            continue
+
+                        # 补全URL
+                        if href.startswith("/"):
+                            href = base_url + href
+                        elif not href.startswith("http"):
+                            continue
+
+                        if href in seen_urls:
+                            continue
+                        seen_urls.add(href)
+
+                        # IP相关性过滤
+                        if not any(kw in title for kw in ip_keywords):
+                            continue
+
+                        news_list.append({"title": title, "url": href})
+                        page_items += 1
+
+                    logger.info(f"[spc_gazette] {page_path} 找到 {page_items} 条IP相关")
+
+                except Exception as e:
+                    logger.error(f"[spc_gazette] {page_url} 爬取异常: {e}")
+                    continue
+
+        logger.info(f"[spc_gazette] 共获取 {len(news_list)} 条IP相关公报内容")
+        return news_list
+
         """最高人民法院 / 最高法IP庭 - 基于<a>标签title属性提取"""
         items = []
         seen_urls = set()
@@ -580,7 +719,30 @@ class NewsCrawler:
         category = news.get("category", "")
         source = news.get("source", "")
 
-        # 最高法指导案例 — 最高优先级
+        # 会议/党建/低价值活动类关键词 — 直接返回-100分（完全过滤）
+        meeting_signals = [
+            # 政治/党建
+            "会议", "座谈", "调研", "考察",
+            "讲话", "精神", "部署", "推进",
+            "党建", "党组", "党委", "带头", "抓落实",
+            # IP 低价值活动（讲座/培训/研讨会/发布会等纯通知）
+            "讲座", "培训", "研讨会", "交流会", "论坛", "峰会",
+            "启动仪式", "开幕式", "闭幕式", "发布会",
+            "活动预告", "议程", "计划安排",
+            "专利文献馆", "公益讲座", "宣讲会",
+            "服务万里行", "督察组", "统计督察",
+            # EPO/国际组织低价值内容
+            "监督审核", "年度研讨会", "合作备忘录",
+        ]
+        for kw in meeting_signals:
+            if kw in title:
+                return -100  # 直接返回-100分，完全过滤
+
+        # 最高法公报 — 最高优先级（司法解释/司法文件/通知）
+        if "最高人民法院公报" in source:
+            score += 30
+
+        # 最高法指导案例
         if "最高人民法院指导案例" in source:
             score += 20
 
@@ -611,16 +773,11 @@ class NewsCrawler:
             if kw in title:
                 score += 2
 
-        # 会议/党建类关键词扣分（针对专利类文章）
-        if category == "patent":
-            meeting_signals = [
-                "会议", "座谈", "调研", "考察", "学习",
-                "讲话", "精神", "部署", "推进", "建设",
-                "党建", "党组", "党委", "带头", "抓落实",
-            ]
-            for kw in meeting_signals:
-                if kw in title:
-                    score -= 3
+        # 实质内容检查：无法律/法规关键词 = 纯公告/统计数字，严重扣分
+        all_substance_keywords = legal_keywords + regulatory_keywords
+        has_substance = any(kw in title for kw in all_substance_keywords)
+        if not has_substance:
+            score -= 15
 
         # 标题长度适中加分
         title_len = len(title)
@@ -629,22 +786,52 @@ class NewsCrawler:
 
         return score
 
-    def _is_similar_to_recent(self, title, recent_keywords, threshold=0.6):
-        """检查标题是否与最近已发布的文章相似"""
-        if not recent_keywords:
+    def _is_similar_to_recent(self, title, recent_titles, threshold=0.6):
+        """检查标题是否与最近已发布/已选用的文章标题相似（比对爬取主题）
+
+        中文走关键词重叠率（阈值0.6），英文走单词重叠率（阈值0.4，因为英文标题词数少）。
+        历史数据中的智能引号等问题在 extract_keywords 内部统一清洗。
+        """
+        if not recent_titles:
             return False
 
         title_words = set(self.extract_keywords(title))
+        is_english = not title_words
+
+        if is_english:
+            # 英文回退：按空格分词，取3字符以上的词干
+            import string as _string
+            eng_words = set()
+            for w in title.split():
+                w = w.strip(_string.punctuation).lower()
+                if len(w) >= 3:
+                    eng_words.add(w)
+            title_words = eng_words
+            threshold_to_use = 0.4
+        else:
+            threshold_to_use = threshold
+
         if not title_words:
             return False
 
-        for recent_title in recent_keywords:
-            recent_words = set(re.findall(r'[一-鿿]{2,8}', recent_title))
+        for recent_title in recent_titles:
+            if is_english:
+                # 英文：同样分词后比较
+                recent_eng = set()
+                for w in recent_title.split():
+                    w = w.strip(_string.punctuation).lower()
+                    if len(w) >= 3:
+                        recent_eng.add(w)
+                recent_words = recent_eng
+            else:
+                # 中文：清洗标点后提取关键词
+                cleaned_recent = re.sub(r'[“”‘’「」『』「」『』""'']', '', recent_title)
+                recent_words = set(re.findall(r'[一-鿿]{2,8}', cleaned_recent))
             if not recent_words:
                 continue
             overlap = len(title_words & recent_words)
             total = min(len(title_words), len(recent_words))
-            if total > 0 and overlap / total >= threshold:
+            if total > 0 and overlap / total >= threshold_to_use:
                 return True
 
         return False
@@ -664,5 +851,18 @@ class NewsCrawler:
         ]
         for pattern in announcement_patterns:
             if re.search(pattern, title):
+                return True
+        return False
+
+    def _is_memorial(self, title):
+        """检查是否为纪念/悼念/讣告类文章"""
+        memorial_keywords = [
+            "纪念", "悼念", "缅怀", "逝世", "讣告", "追思",
+            "in memory of", "in memoriam", "remembering",
+            "obituary", "passed away", "tribute to",
+        ]
+        title_lower = title.lower()
+        for kw in memorial_keywords:
+            if kw in title_lower:
                 return True
         return False
