@@ -14,6 +14,9 @@ logger = logging.getLogger(__name__)
 
 
 class NewsCrawler:
+
+    # 智能引号/特殊引号字符集，用于统一清洗
+    _QUOTE_RE = re.compile("[\u201c\u201d\u2018\u2019\u300c\u300d\u300e\u300f\u201e\u201f\u201a\u201b\x22\x27]")
     def __init__(self):
         self.headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -53,11 +56,14 @@ class NewsCrawler:
         return False
 
     def extract_keywords(self, title):
-        """从标题提取关键词（先清洗干扰标点，避免智能引号等造成分块偏移）"""
+        """从标题提取关键词（去除数字/标点后按中文字符序列分词）"""
         title = re.sub(r'^(关注|解读|聚焦|速看|解析|重磅|突发|最新)', '', title)
-        # 清除干扰标点：智能引号/中文引号/全角符号
-        title = re.sub(r'[“”‘’「」『』「」『』""'']', '', title)
-        words = re.findall(r'[一-鿿]{2,8}', title)
+        # 去除所有标点：智能引号用 _QUOTE_RE，中文/ASCII标点用正则
+        title = self._QUOTE_RE.sub("", title)
+        title = re.sub(r'[，。、；：！？（）【】《》…·,.;:!?():：，！；？]', '', title)
+        # 去除数字（避免"279号"打断中文连续序列，导致关键词断裂）
+        title = re.sub(r'[0-9０-９]+', '', title)
+        words = re.findall(r'[一-鿿]{2,15}', title)
         return words[:5]
 
     def crawl_all(self, recent_titles=None):
@@ -144,10 +150,11 @@ class NewsCrawler:
             if any(kw in title for kw in ip_check_kw):
                 legit_ip.append(news)
             else:
-                # 不含IP关键词 → 移到 hot_topic（仍有可能是好内容，但不算泛知产）
-                news_copy = news.copy()
-                news_copy["category"] = "hot_topic"
-                grouped["hot_topic"].append(news_copy)
+                # 不含IP关键词 → 检查是否含会议关键词（含则直接丢弃，避免降级后又被过滤导致丢失）
+                if not self.contains_meeting(title):
+                    news_copy = news.copy()
+                    news_copy["category"] = "hot_topic"
+                    grouped["hot_topic"].append(news_copy)
         grouped["general_ip"] = legit_ip
 
         # 百度新闻兜底
@@ -754,6 +761,14 @@ class NewsCrawler:
         if source in official_sources:
             score += 10
 
+        # 国际权威源基础分（避免英文标题翻译损失权重）
+        international_authoritative = [
+            "欧洲专利局", "USPTO联邦公报", "世界知识产权组织",
+            "日本特许厅", "台湾智慧财产局", "Patent Docs",
+        ]
+        if source in international_authoritative:
+            score += 5
+
         # 实质法律内容高分关键词（案例/法规/解读）
         legal_keywords = [
             "判决", "裁定", "案例", "典型", "指导性",
@@ -784,51 +799,57 @@ class NewsCrawler:
         if 15 <= title_len <= 50:
             score += 3
 
+        # 备选库文章时效性衰减（每过1天扣2分，最多扣30分）
+        score -= news.get("_age_penalty", 0)
+
         return score
 
-    def _is_similar_to_recent(self, title, recent_titles, threshold=0.6):
+    def _is_similar_to_recent(self, title, recent_titles, threshold=0.4):
         """检查标题是否与最近已发布/已选用的文章标题相似（比对爬取主题）
 
-        中文走关键词重叠率（阈值0.6），英文走单词重叠率（阈值0.4，因为英文标题词数少）。
-        历史数据中的智能引号等问题在 extract_keywords 内部统一清洗。
+        语言检测基于字符比例（非 extract_keywords 返回值），中文阈值0.4，英文阈值0.3。
+        宁可误杀不可漏网：宁可跳过一篇非重复文章，也不发重复内容。
         """
         if not recent_titles:
             return False
 
-        title_words = set(self.extract_keywords(title))
-        is_english = not title_words
+        cleaned_title = self._QUOTE_RE.sub("", title)
+
+        # 用字符比例判断语言，不依赖 extract_keywords 的返回值
+        chinese_chars = len(re.findall(r'[一-鿿]', cleaned_title))
+        ascii_chars = len(re.findall(r'[a-zA-Z]', cleaned_title))
+        is_english = ascii_chars > chinese_chars * 2 and ascii_chars > 5
 
         if is_english:
-            # 英文回退：按空格分词，取3字符以上的词干
             import string as _string
-            eng_words = set()
-            for w in title.split():
+            title_words = set()
+            for w in cleaned_title.split():
                 w = w.strip(_string.punctuation).lower()
                 if len(w) >= 3:
-                    eng_words.add(w)
-            title_words = eng_words
-            threshold_to_use = 0.4
+                    title_words.add(w)
+            threshold_to_use = 0.3
         else:
+            title_words = set(self.extract_keywords(cleaned_title))
             threshold_to_use = threshold
 
         if not title_words:
             return False
 
         for recent_title in recent_titles:
+            cleaned_recent = self._QUOTE_RE.sub("", recent_title)
+
             if is_english:
-                # 英文：同样分词后比较
-                recent_eng = set()
-                for w in recent_title.split():
+                recent_words = set()
+                for w in cleaned_recent.split():
                     w = w.strip(_string.punctuation).lower()
                     if len(w) >= 3:
-                        recent_eng.add(w)
-                recent_words = recent_eng
+                        recent_words.add(w)
             else:
-                # 中文：清洗标点后提取关键词
-                cleaned_recent = re.sub(r'[“”‘’「」『』「」『』""'']', '', recent_title)
-                recent_words = set(re.findall(r'[一-鿿]{2,8}', cleaned_recent))
+                recent_words = set(self.extract_keywords(cleaned_recent))
+
             if not recent_words:
                 continue
+
             overlap = len(title_words & recent_words)
             total = min(len(title_words), len(recent_words))
             if total > 0 and overlap / total >= threshold_to_use:
@@ -837,19 +858,38 @@ class NewsCrawler:
         return False
 
     def _is_company_announcement(self, title):
-        """检查是否为公司公告（如"泰林生物:关于取得商标注册证书..."）"""
-        # 匹配 "公司名:关于..." 或 "公司名：关于..." 模式
-        if re.search(r'[\w]{2,10}[:：]\s*关于[取得获得收到]', title):
-            return True
-        # 匹配纯公司公告关键词
-        announcement_patterns = [
-            r'关于取得[商标专利著作权]',
-            r'关于获得[商标专利著作权]',
-            r'关于收到[商标专利著作权]',
-            r'关于[取得获得收到].*证书',
-            r'关于[取得获得收到].*注册',
+        """检查是否为公司例行公告
+
+        只过滤例行注册/证书/受理/专利数量类公告，不过滤有实质法律意义的公司新闻。
+        """
+        # 有实质法律意义的关键词 → 不过滤
+        substantive_keywords = [
+            "判决", "裁定", "侵权", "赔偿", "纠纷", "无效", "诉讼",
+            "起诉", "被告", "原告", "罚款", "处罚", "查处", "调查",
+            "禁令", "和解", "调解", "仲裁", "上诉", "撤诉",
+            "抢注", "维权", "假冒", "山寨", "盗版", "抄袭",
         ]
-        for pattern in announcement_patterns:
+        if any(kw in title for kw in substantive_keywords):
+            return False
+
+        # 例行公告模式匹配
+        routine_patterns = [
+            # 取得/获得/收到 + 证书/注册/受理
+            r'关于取得.*[证书注册受理]',
+            r'关于获得.*[证书注册受理]',
+            r'关于收到.*[证书注册受理]',
+            r'关于.*商标注册证书',
+            r'关于.*专利证书',
+            r'关于.*著作权登记',
+            # 专利数量公告："累计获得授权发明专利\d+项"
+            r'累计获得授权',
+            r'获得授权专利.*项',
+            r'获得授权发明.*项',
+            r'实用新型专利\d+项.*外观',
+            r'公布.*成绩单',
+            r'公司获得.*专利.*项',
+        ]
+        for pattern in routine_patterns:
             if re.search(pattern, title):
                 return True
         return False
