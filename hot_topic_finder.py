@@ -65,15 +65,21 @@ class HotTopicFinder:
 
     def find_hot_topic(self, query=None, days=7):
         """
-        搜索热点话题，最多尝试3个不同搜索词，直到找到>50分的热点。
+        搜索热点话题，>50分直接返回，35-50分兜底返回。
 
         Returns:
             dict: {"title": str, "source": str, "url": str, "content": str, "score": int}
             None: 如果3次均未找到合适话题
         """
+        PASS_THRESHOLD = 60
+        FALLBACK_THRESHOLD = 45
+
         if not self.available:
             logger.warning("last30days-cn 技能不可用")
             return None
+
+        best_fallback = None
+        best_fallback_score = 0
 
         for attempt in range(3):
             if attempt == 0 and query:
@@ -89,15 +95,30 @@ class HotTopicFinder:
                     logger.warning(f"  搜索无结果, 尝试下一个关键词")
                     continue
 
-                topic = self._select_best_topic(result, search_query)
-                if topic:
-                    logger.info(f"发现热点话题: {topic['title'][:40]}... (score={topic.get('score', 0)})")
+                topic, score = self._select_best_topic(result, search_query)
+
+                if topic is None:
+                    logger.info(f"  无有效候选, 尝试下一个关键词")
+                    continue
+
+                if score >= PASS_THRESHOLD:
+                    topic["score"] = score
+                    logger.info(f"发现热点话题: {topic['title'][:40]}... (score={score})")
                     return topic
 
-                logger.info(f"  未找到>50分话题, 尝试下一个关键词")
+                if score >= FALLBACK_THRESHOLD and score > best_fallback_score:
+                    best_fallback = topic
+                    best_fallback_score = score
+                    logger.info(f"  兜底候选更新: {score}分 {topic['title'][:30]}...")
+
             except Exception as e:
                 logger.warning(f"  搜索异常: {e}, 尝试下一个关键词")
                 continue
+
+        if best_fallback:
+            best_fallback["score"] = best_fallback_score
+            logger.info(f"启用兜底(>={FALLBACK_THRESHOLD}分): {best_fallback['title'][:40]}... (score={best_fallback_score})")
+            return best_fallback
 
         logger.info("3次搜索均未找到合适的热点话题")
         return None
@@ -163,7 +184,7 @@ class HotTopicFinder:
             return None
 
     def _select_best_topic(self, data, query):
-        """从搜索结果中选择最佳话题 — 关键词初筛 + LLM终评（>50分入选）"""
+        """从搜索结果中选择最高分话题，返回 (topic_dict, score) 或 (None, 0)"""
         all_items = []
 
         # 收集所有平台的结果
@@ -174,7 +195,7 @@ class HotTopicFinder:
                 all_items.append(item)
 
         if not all_items:
-            return None
+            return None, 0
 
         # 硬性过滤 + 关键词初评
         filtered = []
@@ -232,13 +253,13 @@ class HotTopicFinder:
             filtered.append(item)
 
         if not filtered:
-            return None
+            return None, 0
 
         # 按关键词分数排序，取前5名送LLM终评
         filtered.sort(key=lambda x: x["_final_score"], reverse=True)
         candidates = filtered[:5]
 
-        # LLM 评分（>50分入选）
+        # LLM 终评，只找最高分
         best = None
         best_llm_score = 0
         for candidate in candidates:
@@ -249,26 +270,23 @@ class HotTopicFinder:
             candidate["_llm_score"] = llm_score
             candidate["_llm_reason"] = llm_reason
             logger.info(f"  LLM评分 {llm_score}/100: {text[:30]}... | {llm_reason}")
-            if llm_score >= 50 and llm_score > best_llm_score:
+            if llm_score > best_llm_score:
                 best = candidate
                 best_llm_score = llm_score
 
         if best is None:
-            logger.info("  LLM评分无>50分的候选话题，不替换")
-            return None
+            return None, 0
 
         text = best.get("_text", "")
-        title = self._extract_title(text)
 
         return {
-            "title": title,
+            "title": self._extract_title(text),
             "source": self._platform_name(best.get("_platform", "")),
             "url": best.get("url", ""),
             "content": text[:500],
-            "score": best_llm_score,
             "engagement": best.get("engagement", {}),
             "date": best.get("date", ""),
-        }
+        }, best_llm_score
 
     def _score_with_llm(self, text):
         """LLM评分热点话题 — 返回 (分数, 理由) 或 (None, None)"""
@@ -282,17 +300,29 @@ class HotTopicFinder:
                 "temperature": 0.3,
                 "max_tokens": 512,  # 增加 tokens，避免 reasoning_content 消耗完
             }
-            resp = requests.post(
-                Config.MINIMAX_API_URL,
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {Config.MINIMAX_API_KEY}",
-                },
-                json=payload,
-                timeout=30,
-            )
-            if resp.status_code != 200:
-                logger.warning(f"  LLM评分请求失败: {resp.status_code}")
+            resp = None
+            for attempt in range(3):
+                resp = requests.post(
+                    Config.MINIMAX_API_URL,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {Config.MINIMAX_API_KEY}",
+                    },
+                    json=payload,
+                    timeout=30,
+                )
+                if resp.status_code == 200:
+                    break
+                elif resp.status_code == 529:
+                    wait = 2 ** attempt * 5  # 5s, 10s
+                    logger.warning(f"  LLM评分529过载，{wait}s后重试...")
+                    time.sleep(wait)
+                    continue
+                else:
+                    logger.warning(f"  LLM评分请求失败: {resp.status_code}")
+                    return None, None
+
+            if resp is None or resp.status_code != 200:
                 return None, None
 
             result = resp.json()
@@ -513,7 +543,7 @@ class HotTopicFinder:
         return result_items[:20]
 
     def _should_skip(self, text):
-        """硬性过滤：政治敏感 / 低俗色情 / 暴力 / 会议活动 / 无意义内容"""
+        """硬性过滤：政治敏感 / 低俗色情 / 暴力 / 会议活动 / 伪科学健康 / 无意义内容"""
         political_keywords = ["总书记", "国家主席", "总理", "常委", "政治局", "中央", "国务院",
                               "党委", "党支部", "党员", "反动", "颠覆", "分裂", "抗议", "示威", "游行",
                               "马英九", "台湾", "国民党", "民进党", "两岸"]  # 政治人物/事件
@@ -522,11 +552,19 @@ class HotTopicFinder:
         # 会议/活动类内容（不适合吸睛主题）
         meeting_keywords = ["研讨会", "交流会", "论坛", "峰会", "座谈会", "发布会",
                            "启动仪式", "开幕式", "闭幕式", "培训", "讲座", "宣讲"]
+        # 伪科学/可疑健康营销（AI会拒绝生成，浪费一次尝试）
+        dubious_health = [
+            "告别癌", "治愈癌", "抗癌食物", "杀死癌细胞", "癌友",
+            "告别慢性病", "治愈糖尿病", "根治", "奇迹般", "惊人变化",
+            "偏方", "秘方", "祖传秘方", "独门", "排毒", "碱性体质",
+            "绿拿铁", "酵素", "断食疗法", "自然疗法", "食疗治",
+        ]
         # 无意义/广告内容
         skip_patterns = ["关于搜狗", "企业推广", "反馈", "点击链接", "转发抽奖", "广告推广",
                         "corp.sogou.com", "sogou.com"]
 
-        for kw in political_keywords + vulgar_keywords + meeting_keywords + skip_patterns:
+        all_keywords = political_keywords + vulgar_keywords + meeting_keywords + dubious_health + skip_patterns
+        for kw in all_keywords:
             if kw in text:
                 return True
 

@@ -82,10 +82,22 @@ class Scheduler:
                     if self.crawler._is_memorial(title):
                         self.db.mark_used_pending(pa["id"])
                         continue
-                    # 避免与当日新爬取文章重复
+                    # 避免与当日新爬取文章重复（精确匹配）
                     if any(n.get("title") == title for n in grouped.get(cat, [])):
                         continue
+                    # 模糊去重：比对已发布标题，避免同主题不同标题重复发布
+                    if self.crawler._is_similar_to_recent(title, recent_titles):
+                        self.db.mark_used_pending(pa["id"])
+                        logger.debug(f"  备选库模糊去重: {title[:30]}...")
+                        continue
                     # 备选库文章插入到列表头部（排序最高）
+                    # 计算时效性衰减：每过1天扣2分，最多扣30分
+                    created_at = pa.get("created_at")
+                    if created_at:
+                        days_old = (datetime.now() - created_at).days
+                        age_penalty = min(days_old * 2, 30)
+                    else:
+                        age_penalty = 0
                     grouped[cat].insert(0, {
                         "title": title,
                         "source": pa.get("source", ""),
@@ -95,6 +107,7 @@ class Scheduler:
                         "keywords": pa.get("keywords", "").split(",") if pa.get("keywords") else [],
                         "_from_pending": True,
                         "_pending_id": pa["id"],
+                        "_age_penalty": age_penalty,
                     })
                     pending_ids_in_pool.add(pa["id"])
                     merged_count += 1
@@ -203,6 +216,10 @@ class Scheduler:
                 )
 
                 if content and len(content.strip()) > 100:
+                    # 检测AI拒绝生成（模型认为内容不适合撰写）
+                    if self.generator._is_refusal(content):
+                        logger.warning(f"  AI拒绝生成此话题，跳过: {title[:30]}...")
+                        continue
                     short_title = self.generator.generate_title(title, category=category)
                     digest = self.generator.generate_digest(content)
 
@@ -268,7 +285,7 @@ class Scheduler:
                 logger.error("草稿创建失败")
 
             # 清理过期待用新闻
-            self.db.cleanup_old_pending(days=60)
+            self.db.cleanup_old_pending(days=14)
 
             logger.info("=" * 60)
 
