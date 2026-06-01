@@ -298,7 +298,8 @@ class HotTopicFinder:
                     {"role": "user", "content": f"{HOTSPOT_SCORE_PROMPT}\n\n文章内容:\n{text[:500]}"}
                 ],
                 "temperature": 0.3,
-                "max_tokens": 512,  # 增加 tokens，避免 reasoning_content 消耗完
+                "max_completion_tokens": 512,
+                "thinking": {"type": "disabled"}
             }
             resp = None
             for attempt in range(3):

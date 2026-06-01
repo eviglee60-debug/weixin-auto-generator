@@ -242,7 +242,8 @@ class AIGenerator:
             "model": Config.MINIMAX_MODEL,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.8,
-            "max_tokens": 16384
+            "max_completion_tokens": 16384,
+            "thinking": {"type": "disabled"}
         }
 
         for attempt in range(self.max_retries):
@@ -567,13 +568,14 @@ class AIGenerator:
             "model": Config.MINIMAX_MODEL,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.8,
-            "max_tokens": max(max_tokens, 2048)
+            "max_completion_tokens": max(max_tokens, 2048),
+            "thinking": {"type": "disabled"}
         }
 
         for attempt in range(3):
             try:
                 t0 = time.time()
-                logger.info(f"轻量LLM调用 attempt={attempt+1}, max_tokens={data['max_tokens']}, prompt_len={len(prompt)}")
+                logger.info(f"轻量LLM调用 attempt={attempt+1}, max_tokens={data['max_completion_tokens']}, prompt_len={len(prompt)}")
                 response = requests.post(
                     self.api_url, headers=headers, json=data, timeout=120
                 )
@@ -588,8 +590,8 @@ class AIGenerator:
                         finish = choice.get("finish_reason", "")
 
                         if not content and finish == "length" and attempt < 2:
-                            data["max_tokens"] = data["max_tokens"] * 2
-                            logger.warning(f"轻量LLM content为空(finish=length)，加倍max_tokens={data['max_tokens']}重试")
+                            data["max_completion_tokens"] = data["max_completion_tokens"] * 2
+                            logger.warning(f"轻量LLM content为空(finish=length)，加倍max_tokens={data['max_completion_tokens']}重试")
                             time.sleep(2)
                             continue
 

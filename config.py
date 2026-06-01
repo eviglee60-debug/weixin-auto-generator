@@ -9,8 +9,8 @@ class Config:
     WECHAT_SECRET = os.environ.get("WECHAT_SECRET")
 
     MINIMAX_API_KEY = os.environ.get("MINIMAX_API_KEY")
-    MINIMAX_API_URL = os.environ.get("MINIMAX_API_URL", "https://api.minimax.chat/v1/text/chatcompletion_v2")
-    MINIMAX_MODEL = os.environ.get("MINIMAX_MODEL", "MiniMax-M2.7")
+    MINIMAX_API_URL = os.environ.get("MINIMAX_API_URL", "https://api.minimaxi.com/v1/chat/completions")
+    MINIMAX_MODEL = os.environ.get("MINIMAX_MODEL", "MiniMax-M3")
 
     # MiniMax Anthropic 兼容端点（用于 coding-plan 系列模型）
     MINIMAX_API_BASE_URL = os.environ.get("MINIMAX_API_BASE_URL", "https://api.minimaxi.com/anthropic/v1")
