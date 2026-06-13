@@ -97,6 +97,10 @@ class NewsCrawler:
                     logger.error(f"[{source_id}] 爬取异常: {e}")
 
         # 过滤：敏感词 + 批次去重 + 历史去重（比对爬取主题）+ 公司公告
+        # 构建归一化去重集合（去掉所有标点符号后的版本）
+        _punct_re = re.compile(r'[，。、；：！？（）【】《》…·,.;:!?()\[\]{}<>\'\"""''\s\-—–/\\·]')
+        normalized_recent = {_punct_re.sub("", self._QUOTE_RE.sub("", t)) for t in (recent_titles or [])}
+
         filtered = []
         for news in all_news:
             if self.contains_sensitive(news["title"]):
@@ -105,8 +109,13 @@ class NewsCrawler:
                 continue
             if self.is_duplicate(news["title"]):
                 continue
-            if recent_titles and self._is_similar_to_recent(news["title"], recent_titles):
-                continue
+            # 超强去重：归一化后精确匹配 + 原始模糊匹配
+            if recent_titles:
+                normalized_title = _punct_re.sub("", self._QUOTE_RE.sub("", news["title"]))
+                if normalized_title in normalized_recent:
+                    continue
+                if self._is_similar_to_recent(news["title"], recent_titles):
+                    continue
             if self._is_company_announcement(news["title"]):
                 continue
             if self._is_memorial(news["title"]):
@@ -157,10 +166,10 @@ class NewsCrawler:
                     grouped["hot_topic"].append(news_copy)
         grouped["general_ip"] = legit_ip
 
-        # 百度新闻兜底
+        # 百度新闻兜底（也做去重检查）
         for cat in ["patent", "general_ip", "hot_topic"]:
             if not grouped[cat]:
-                fallback = self._crawl_baidu_fallback(cat)
+                fallback = self._crawl_baidu_fallback(cat, recent_titles)
                 if fallback:
                     grouped[cat].extend(fallback)
 
@@ -224,6 +233,8 @@ class NewsCrawler:
         if "fallback_urls" in source_cfg:
             urls.extend(source_cfg["fallback_urls"])
 
+        all_items = []
+        seen_urls = set()
         for url in urls:
             try:
                 resp = requests.get(url, headers=self.headers, timeout=15, verify=False,
@@ -235,19 +246,23 @@ class NewsCrawler:
                 soup = BeautifulSoup(resp.text, 'html.parser')
 
                 if source_id in ("spc", "spc_ip"):
-                    items = self._extract_spc_items(soup, base_url, source_id)
+                    batch = self._extract_news_items(soup, source_id, base_url)
                 elif source_id.startswith("cnipa"):
-                    items = self._extract_cnipa_items(soup)
+                    batch = self._extract_cnipa_items(soup)
                 else:
-                    items = self._extract_news_items(soup, source_id, base_url)
+                    batch = self._extract_news_items(soup, source_id, base_url)
 
-                if items:
-                    break
+                # 去重累积
+                for item in batch:
+                    if item["url"] not in seen_urls:
+                        seen_urls.add(item["url"])
+                        all_items.append(item)
+
             except Exception as e:
                 logger.debug(f"[{source_id}] {url} 请求失败: {e}")
                 continue
 
-        return items
+        return all_items
 
     def enrich_with_images(self, news_list, max_per_item=3):
         """为新闻列表补充源文章页面的图片"""
@@ -644,7 +659,7 @@ class NewsCrawler:
 
         # 策略1：找所有 <a> 标签中看起来像新闻标题的
         for a in soup.find_all('a', href=True):
-            title = a.get_text(strip=True)
+            title = a.get('title', '').strip() or a.get_text(strip=True)
             href = a['href']
 
             # 过滤条件
@@ -656,6 +671,10 @@ class NewsCrawler:
                 '上一页', '导航', 'footer', 'header', 'menu',
                 'copyright', 'icp', '备案', '网站地图', 'contact us',
                 'patent basics', 'go to overview', 'search',
+                '简介', '概况', '机构设置', '领导信息', 'english',
+                '信息公开', '网上信访', '公益诉讼', '检察服务',
+                '12309', '中国检察网', '航贸指数', '大数据共享', '图说',
+                '读书', '举报', '联系我们', '邮箱',
             ]):
                 continue
             # 排除非新闻链接
@@ -683,8 +702,8 @@ class NewsCrawler:
 
         return items
 
-    def _crawl_baidu_fallback(self, category):
-        """百度新闻兜底爬取"""
+    def _crawl_baidu_fallback(self, category, recent_titles=None):
+        """百度新闻兜底爬取（含去重检查）"""
         keyword_map = {
             "patent": ["专利 发明 实用新型", "专利侵权 判决", "PCT国际专利"],
             "general_ip": ["商标注册 著作权", "知识产权保护", "商业秘密 侵权"],
@@ -692,6 +711,13 @@ class NewsCrawler:
         }
         keywords = keyword_map.get(category, keyword_map["hot_topic"])
         news_list = []
+
+        # 构建归一化去重集合
+        _qr = self._QUOTE_RE
+        _punct_re = re.compile(r'[，。、；：！？（）【】《》…·,.;:!?()\[\]{}<>\'"""''\s\-—–/\\·]')
+        normalized_recent = set()
+        if recent_titles:
+            normalized_recent = {_punct_re.sub("", _qr.sub("", t)) for t in recent_titles}
 
         for keyword in keywords[:1]:
             try:
@@ -707,6 +733,15 @@ class NewsCrawler:
                             if self._is_company_announcement(title):
                                 logger.debug(f"百度兜底跳过公司公告: {title[:30]}")
                                 continue
+                            # 去重检查
+                            if normalized_recent:
+                                norm = _punct_re.sub("", _qr.sub("", title))
+                                if norm in normalized_recent:
+                                    logger.debug(f"百度兜底去重跳过: {title[:30]}")
+                                    continue
+                                if self._is_similar_to_recent(title, recent_titles):
+                                    logger.debug(f"百度兜底模糊去重跳过: {title[:30]}")
+                                    continue
                             news_list.append({
                                 "title": title,
                                 "source": "百度新闻",
@@ -727,6 +762,19 @@ class NewsCrawler:
         source = news.get("source", "")
 
         # 会议/党建/低价值活动类关键词 — 直接返回-100分（完全过滤）
+        # 英文政府公告/行政通知 — 无中文读者价值，直接过滤
+        ascii_chars = len(re.findall(r'[a-zA-Z]', title))
+        chinese_chars = len(re.findall(r'[一-鿿]', title))
+        if ascii_chars > 20 and chinese_chars == 0:
+            english_notice_keywords = [
+                "Agency Information", "Submission to", "Comment Request",
+                "Notice of", "Proposed Rule", "Final Rule", "Extension and Modification",
+                "Collection Activities", "Information Collection",
+            ]
+            for kw in english_notice_keywords:
+                if kw in title:
+                    return -100
+
         meeting_signals = [
             # 政治/党建
             "会议", "座谈", "调研", "考察",

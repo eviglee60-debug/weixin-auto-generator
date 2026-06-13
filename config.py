@@ -79,7 +79,7 @@ class Config:
             "base_url": "https://www.court.gov.cn",
             "category": "patent",
             "region": "china",
-            "max_pages": 2,  # 每栏目爬取前2页
+            "max_pages": 5,  # 每栏目爬取前5页
             "priority_boost": 30,  # 最高优先级
             # 只爬取IP相关的栏目
             "columns": [
@@ -108,6 +108,10 @@ class Config:
             "name": "最高人民法院知识产权法庭",
             "url": "https://ipc.court.gov.cn/zh-cn/news/more-12-12.html",
             "base_url": "https://ipc.court.gov.cn",
+            "fallback_urls": [
+                "https://ipc.court.gov.cn/zh-cn/news/more-11-11.html",
+                "https://ipc.court.gov.cn/zh-cn/news/more-5-32.html",
+            ],
             "category": "patent",
             "region": "china",
         },
@@ -219,6 +223,34 @@ class Config:
             "base_url": "http://www.iprchn.com",
             "category": "general_ip",
             "region": "china",
+        },
+        "iprdaily": {
+            "name": "IPR Daily",
+            "url": "https://www.iprdaily.com/",
+            "base_url": "https://www.iprdaily.com",
+            "category": "general_ip",
+            "region": "china",
+        },
+        "spp": {
+            "name": "最高人民检察院",
+            "url": "https://www.spp.gov.cn/spp/xwfbh/wsfbt/index.shtml",
+            "base_url": "https://www.spp.gov.cn",
+            "category": "general_ip",
+            "region": "china",
+        },
+        "spp_cases": {
+            "name": "最高人民检察院-典型案例",
+            "url": "https://www.spp.gov.cn/spp/zdgz/index.shtml",
+            "base_url": "https://www.spp.gov.cn",
+            "category": "general_ip",
+            "region": "china",
+        },
+        "bri": {
+            "name": "一带一路",
+            "url": "https://www.yidaiyilu.gov.cn/",
+            "base_url": "https://www.yidaiyilu.gov.cn",
+            "category": "general_ip",
+            "region": "international",
         },
         # === patent 补充 ===
         "us_supreme": {
