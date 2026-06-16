@@ -137,15 +137,25 @@ class HotTopicFinder:
             return LEGAL_SEARCH_QUERIES[(t + offset) % len(LEGAL_SEARCH_QUERIES)]
 
     def _run_search(self, query, days=7):
+        """执行 last30days-cn 搜索（默认模式，300秒超时）"""
+        return self._run_search_impl(query, days, timeout=300, quick=False)
+
+    def _run_search_quick(self, query, days=7):
+        """执行 last30days-cn 快速搜索（90秒超时，用于速览文章）"""
+        return self._run_search_impl(query, days, timeout=90, quick=True)
+
+    def _run_search_impl(self, query, days=7, timeout=300, quick=False):
         """执行 last30days-cn 搜索"""
         try:
             cmd = [
                 "python3", self.skill_script,
                 query,
                 "--emit", "json",
-                "--quick",
+                "--timeout", str(timeout),
                 "--days", str(days),
             ]
+            if quick:
+                cmd.append("--quick")
 
             env = os.environ.copy()
             env["PYTHONPATH"] = os.path.dirname(self.skill_script)
@@ -154,7 +164,7 @@ class HotTopicFinder:
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=120,
+                timeout=timeout + 20,
                 env=env,
             )
 
@@ -458,7 +468,7 @@ class HotTopicFinder:
         max_workers = min(4, len(categories))
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
-                executor.submit(self._run_search, cat["query"], days): cat
+                executor.submit(self._run_search_quick, cat["query"], days): cat
                 for cat in categories
             }
             for future in as_completed(futures):
@@ -490,7 +500,7 @@ class HotTopicFinder:
                                 "score": item.get("score", 0) + priority * 10,
                             })
                     cat_items.sort(key=lambda x: x["score"], reverse=True)
-                    for item in cat_items[:3]:
+                    for item in cat_items[:6]:
                         priority_groups[priority].append(item)
                 except Exception as e:
                     logger.warning(f"搜索 {label} 失败: {e}")
