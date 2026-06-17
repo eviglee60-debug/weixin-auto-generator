@@ -163,6 +163,34 @@ class Database:
             logger.error(f"获取已发布标题失败: {e}")
             return set()
 
+    def fetch_unused_pending_news(self, limit=20):
+        """获取未使用的备选新闻"""
+        try:
+            conn = self.get_connection()
+            with conn.cursor(dictionary=True) as cursor:
+                cursor.execute(
+                    "SELECT id, title, source, category, region, url FROM pending_news "
+                    "WHERE used = 0 ORDER BY created_at DESC LIMIT %s",
+                    (limit,)
+                )
+                return cursor.fetchall()
+        except Exception as e:
+            logger.error(f"获取备选新闻失败: {e}")
+            return []
+
+    def mark_pending_news_used(self, ids):
+        """标记备选新闻为已使用"""
+        if not ids:
+            return
+        try:
+            conn = self.get_connection()
+            with conn.cursor() as cursor:
+                placeholders = ",".join(["%s"] * len(ids))
+                cursor.execute(f"UPDATE pending_news SET used = 1 WHERE id IN ({placeholders})", ids)
+            conn.commit()
+        except Exception as e:
+            logger.error(f"标记备选新闻失败: {e}")
+
     def get_all_pending_titles(self):
         """获取备选库中所有未使用文章的标题集合"""
         try:
@@ -231,7 +259,7 @@ class Database:
         except Exception as e:
             logger.error(f"标记待用新闻失败: {e}")
 
-    def cleanup_old_pending(self, days=60):
+    def cleanup_old_pending(self, days=14):
         """清理过期待用新闻"""
         try:
             conn = self.get_connection()

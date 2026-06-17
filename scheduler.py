@@ -5,6 +5,7 @@ import time
 import schedule
 import sys
 import os
+import re
 from datetime import datetime
 
 os.makedirs("/opt/weixin-auto-generator/logs", exist_ok=True)
@@ -56,6 +57,12 @@ class Scheduler:
             # 合并备选库中的标题（备选库文章可被选中，但需要去重）
             pending_titles = self.db.get_all_pending_titles()
             dedup_titles = set(recent_titles) | set(pending_titles)
+            # 超强归一化：去掉所有引号+标点+空格后加入去重集合
+            # 防止 Unicode 弯引号 vs ASCII 引号 vs 全角字符导致匹配失败
+            _qr = NewsCrawler._QUOTE_RE
+            _punct_re = re.compile(r'[，。、；：！？（）【】《》…·,.;:!?()\[\]{}<>\'\"""''\s\-—–/\\·]')
+            dedup_titles |= {_qr.sub("", t) for t in dedup_titles}
+            dedup_titles |= {_punct_re.sub("", t) for t in dedup_titles}
             logger.info(f"去重标题集合: 已发布{len(recent_titles)}个 + 备选库{len(pending_titles)}个 = {len(dedup_titles)}个")
 
             # ============================================================
@@ -85,10 +92,22 @@ class Scheduler:
                     # 避免与当日新爬取文章重复（精确匹配）
                     if any(n.get("title") == title for n in grouped.get(cat, [])):
                         continue
-                    # 模糊去重：比对已发布标题，避免同主题不同标题重复发布
-                    if self.crawler._is_similar_to_recent(title, recent_titles):
+                    # 精确去重：标题已在去重集合中（含归一化版本）
+                    if title in dedup_titles:
                         self.db.mark_used_pending(pa["id"])
-                        logger.debug(f"  备选库模糊去重: {title[:30]}...")
+                        logger.info(f"  备选库精确去重: {title[:30]}...")
+                        continue
+                    # 归一化去重：去掉所有标点后比对
+                    _nr = re.compile(r'[，。、；：！？（）【】《》…·,.;:!?()\[\]{}<>\'\"""''\s\-—–/\\·]')
+                    normalized_title = _nr.sub("", NewsCrawler._QUOTE_RE.sub("", title))
+                    if normalized_title in {_nr.sub("", NewsCrawler._QUOTE_RE.sub("", t)) for t in dedup_titles}:
+                        self.db.mark_used_pending(pa["id"])
+                        logger.info(f"  备选库归一化去重: {title[:30]}...")
+                        continue
+                    # 模糊去重：比对 dedup_titles（含已发布+备选库），避免同主题不同标题重复发布
+                    if self.crawler._is_similar_to_recent(title, dedup_titles):
+                        self.db.mark_used_pending(pa["id"])
+                        logger.info(f"  备选库模糊去重: {title[:30]}...")
                         continue
                     # 备选库文章插入到列表头部（排序最高）
                     # 计算时效性衰减：每过1天扣2分，最多扣30分
@@ -128,15 +147,20 @@ class Scheduler:
             patent_news = grouped.get("patent", [])
             if patent_news:
                 patent_news.sort(key=lambda x: self.crawler._priority_score(x), reverse=True)
-                selected.append(patent_news[0])
-                logger.info(f"  文章1(专利): {patent_news[0]['title'][:30]}...")
+                # 过滤会议/低价值内容（_priority_score 返回 -100 表示会议关键词命中）
+                patent_news = [n for n in patent_news if self.crawler._priority_score(n) > -100]
+                if patent_news:
+                    selected.append(patent_news[0])
+                    logger.info(f"  文章1(专利): {patent_news[0]['title'][:30]}...")
 
             # 文章2：泛知产领域
             general_ip_news = grouped.get("general_ip", [])
             if general_ip_news:
                 general_ip_news.sort(key=lambda x: self.crawler._priority_score(x), reverse=True)
-                selected.append(general_ip_news[0])
-                logger.info(f"  文章2(泛知产): {general_ip_news[0]['title'][:30]}...")
+                general_ip_news = [n for n in general_ip_news if self.crawler._priority_score(n) > -100]
+                if general_ip_news:
+                    selected.append(general_ip_news[0])
+                    logger.info(f"  文章2(泛知产): {general_ip_news[0]['title'][:30]}...")
 
             # 标记被选中的待用队列文章为已用
             for news in selected:
@@ -334,53 +358,47 @@ class Scheduler:
             if not any(kw in n.get("title", "") for kw in meeting_keywords)
         ]
 
+        # 降级：爬虫剩余内容不足时，从 pending_news 补充
+        MIN_DIGEST_ITEMS = 5
+        if len(all_remaining) < MIN_DIGEST_ITEMS:
+            need = MIN_DIGEST_ITEMS - len(all_remaining)
+            logger.warning(f"速览候选不足（{len(all_remaining)} 条 < {MIN_DIGEST_ITEMS}），尝试从 pending_news 补充 {need} 条")
+            try:
+                exclude_titles = selected_titles | {n["title"] for n in all_remaining}
+                exclude_titles |= set(self.db.get_recent_titles(days=30))
+                pending_candidates = self.db.fetch_unused_pending_news(limit=need * 3)
+                supplement = []
+                used_ids = []
+                for item in pending_candidates:
+                    if item["title"] in exclude_titles:
+                        continue
+                    supplement.append({
+                        "title": item["title"],
+                        "source": item.get("source", ""),
+                        "category": item.get("category", ""),
+                        "url": item.get("url", ""),
+                    })
+                    exclude_titles.add(item["title"])
+                    if item.get("id"):
+                        used_ids.append(item["id"])
+                    if len(supplement) >= need:
+                        break
+                if supplement:
+                    logger.info(f"从 pending_news 补充 {len(supplement)} 条速览内容")
+                    all_remaining.extend(supplement)
+                    if used_ids:
+                        self.db.mark_pending_news_used(used_ids)
+            except Exception as e:
+                logger.error(f"pending_news 降级补充失败: {e}", exc_info=True)
+
         if len(all_remaining) < 3:
+            logger.warning(f"速览候选仍不足（{len(all_remaining)} 条），跳过本次速览文章")
             return None
 
         category_labels = {
             "patent": "专利动态",
             "general_ip": "泛知产资讯",
             "hot_topic": "热点关注",
-        }
-
-        # 英文标题翻译映射（常见法律术语）
-        en_translate = {
-            # 机构和角色
-            "v.": "诉", "vs.": "诉", "V.": "诉",
-            "Inc.": "公司", "Corp.": "公司", "LLC": "公司", "LP": "公司",
-            "Co.": "公司", "Ltd.": "公司", "PLC": "公司",
-            "Court": "法院", "Supreme": "最高", "District": "地区",
-            "Federal": "联邦", "Circuit": "巡回", "Justice": "大法官", "Judge": "法官",
-            "Chief Justice": "首席大法官", "Justice": "大法官",
-            # 法律术语
-            "opinion": "意见", "Opinion": "意见", "Order": "命令", "Rule": "规则",
-            "decision": "裁决", "Decision": "裁决", "ruling": "裁定",
-            "patent": "专利", "Patent": "专利", "patents": "专利",
-            "trademark": "商标", "Trademark": "商标", "trademark": "商标",
-            "copyright": "著作权", "Copyright": "著作权",
-            "design": "外观设计", "Design": "外观设计",
-            "Appeal": "上诉", "appeal": "上诉", "appellate": "上诉",
-            "Infringement": "侵权", "infringement": "侵权", "Infringe": "侵权",
-            "Litigation": "诉讼", "litigation": "诉讼", "sue": "起诉",
-            "Settlement": "和解", "settlement": "和解", "negotiate": "协商",
-            "Damages": "赔偿", "damages": "赔偿", "compensation": "赔偿",
-            "License": "许可", "license": "许可", "licensing": "许可",
-            "Application": "申请", "application": "申请", "apply": "申请",
-            "Examination": "审查", "examination": "审查", "examining": "审查",
-            "Grant": "授权", "grant": "授权", "granted": "授权",
-            "Validity": "有效性", "validity": "有效性", "invalid": "无效",
-            "Claim": "权利要求", "claim": "权利要求", "claims": "权利要求",
-            "Specification": "说明书", "specification": "说明书",
-            "Prior Art": "现有技术", "prior art": "现有技术",
-            "intellectual property": "知识产权", "IP": "知识产权",
-            "Trade Secret": "商业秘密", "trade secret": "商业秘密",
-            "Antitrust": "反垄断", "antitrust": "反垄断", "monopoly": "垄断",
-            "Registration": "注册", "registration": "注册", "registered": "已注册",
-            "Renewal": "续展", "renewal": "续展", "expire": "到期",
-            "Office": "局", "office action": "审查意见", "action": "审查意见",
-            "Petition": "请愿", "petition": "请愿", "request": "请求",
-            "Inter Partes Review": "双方复审", "IPR": "双方复审",
-            "Post-Grant": "授权后", "preissuance": "授权前",
         }
 
         items_html = ""
@@ -418,14 +436,14 @@ class Scheduler:
             # 英文标题添加中文翻译
             en_chars = sum(1 for c in title if c.isascii() and c.isalpha())
             if en_chars > len(title) * 0.4 and len(title) > 10:
-                # 翻译常见法律术语
-                zh_title = title
-                for en, zh in en_translate.items():
-                    zh_title = zh_title.replace(en, zh)
-                if zh_title != title:
+                zh_title = ""
+                try:
+                    zh_title = self.generator._translate_title_to_chinese(title)
+                except Exception as e:
+                    logger.warning(f"标题翻译调用异常: {e}")
+                if zh_title:
                     title = f'{title}（{zh_title}）'
                 else:
-                    # 无法翻译时标注来源
                     region_label = "美国" if "supreme" in source.lower() or "美国" in source else "海外"
                     title = f'{title}（{region_label}司法案例）'
 
@@ -627,8 +645,22 @@ function showToast() {{
         schedule.every().day.at("02:00").do(self.generate_and_publish)
         schedule.every().day.at("06:00").do(self.generate_and_publish)
 
-        logger.info("立即执行一次任务...")
-        self.generate_and_publish()
+        # 智能判断：今天已有文章则跳过，避免服务重启产生重复
+        try:
+            recent = self.db.get_recent_articles(days=1)
+            today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            has_run_today = any(
+                r.get("created_at") and r["created_at"] >= today_start
+                for r in (recent or [])
+            )
+        except Exception:
+            has_run_today = False
+
+        if has_run_today:
+            logger.info("今日已有任务执行记录，跳过立即执行")
+        else:
+            logger.info("今日尚无任务，立即执行一次...")
+            self.generate_and_publish()
 
         while True:
             schedule.run_pending()
