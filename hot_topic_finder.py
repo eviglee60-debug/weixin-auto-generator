@@ -45,7 +45,7 @@ LEGAL_SEARCH_QUERIES = [
 ]
 
 # 热门平台关键词（用于筛选结果）
-HOT_PLATFORMS = ["weibo", "bilibili", "zhihu", "toutiao"]
+HOT_PLATFORMS = ["weibo", "bilibili", "zhihu", "toutiao", "baidu", "wechat", "xiaohongshu", "douyin"]
 
 # 热点话题 LLM 评分 Prompt — 100分制，>60分入选
 HOTSPOT_SCORE_PROMPT = """对以下文章按100分制打分，标准：
@@ -148,7 +148,7 @@ class HotTopicFinder:
         """执行 last30days-cn 搜索"""
         try:
             cmd = [
-                "python3", self.skill_script,
+                "/opt/weixin-auto-generator/venv/bin/python3", self.skill_script,
                 query,
                 "--emit", "json",
                 "--timeout", str(timeout),
@@ -169,15 +169,17 @@ class HotTopicFinder:
             )
 
             if result.returncode != 0:
-                logger.warning(f"搜索命令失败: {result.stderr[:200]}")
-                return None
+                # 超时/信号退出时仍可能有部分 stdout，尝试解析
+                logger.info(f"搜索命令退出码 {result.returncode}，尝试解析已有输出...")
 
-            # 解析 JSON 输出
+            # 解析 JSON 输出（优先 stdout，stderr 仅用于调试）
             output = result.stdout
-            # 找到 JSON 开始的位置
             json_start = output.find('{')
             if json_start == -1:
-                logger.warning("输出中未找到 JSON")
+                if result.returncode != 0:
+                    logger.warning(f"搜索命令失败且无有效输出: {result.stderr[:200]}")
+                else:
+                    logger.warning("输出中未找到 JSON")
                 return None
 
             data = json.loads(output[json_start:])
@@ -217,6 +219,19 @@ class HotTopicFinder:
 
             # 跳过太短或空的内容
             if len(text.strip()) < 10:
+                continue
+
+            # 跳过 Bing 兜底的无关结果（relevance=0 且含英文技术内容）
+            why = item.get("why_relevant", "")
+            if "Bing兜底" in why or "Bing fallback" in why:
+                continue
+            relevance = item.get("relevance", 1.0)
+            if relevance == 0:
+                continue
+
+            # 跳过纯英文内容（中文平台热点应以中文为主）
+            chinese_chars = len(re.findall(r'[一-鿿]', text))
+            if chinese_chars < 3 and len(text) > 15:
                 continue
 
             # 使用 _should_skip 进行硬性过滤

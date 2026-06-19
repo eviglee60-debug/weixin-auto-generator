@@ -72,8 +72,12 @@ class WeixinPublisher:
             logger.error(f"创建默认封面异常: {e}")
             return None
 
-    def create_thumb_for_article(self, title, index=0, category="general"):
-        """为指定文章创建封面，优先使用AI生成，失败则回退到模板图"""
+    def create_thumb_for_article(self, title, index=0, category="general", original_title=None):
+        """为指定文章创建封面，优先使用AI生成，失败则回退到模板图
+        Args:
+            title: 显示用短标题
+            original_title: 原始完整标题，用于 Unsplash 搜索关键词提取
+        """
         try:
             access_token = self.get_access_token()
             if not access_token:
@@ -82,10 +86,11 @@ class WeixinPublisher:
             url = f"{self.base_url}/material/add_material?access_token={access_token}&type=thumb"
 
             jpeg_data = None
-            # 优先使用 AI 生成封面
+            # 优先使用 AI 生成封面（用原始标题搜 Unsplash，更精准）
+            search_title = original_title or title
             if self.ai_generator:
                 try:
-                    ai_image = self.ai_generator.generate_cover_image(title, category)
+                    ai_image = self.ai_generator.generate_cover_image(search_title, category)
                     if ai_image and len(ai_image) > 1000:
                         jpeg_data = ai_image
                         logger.info(f"AI封面生成成功: {title}")
@@ -286,12 +291,49 @@ class WeixinPublisher:
             0xFF, 0xD9
         ])
     
+    def _upload_qr_code(self):
+        """上传小程序二维码图片到微信，返回可使用的图片URL"""
+        qr_path = "/www/临时文件夹/小程序二维码.png"
+        if not os.path.exists(qr_path):
+            logger.warning(f"小程序二维码文件不存在: {qr_path}")
+            return None
+        try:
+            access_token = self.get_access_token()
+            if not access_token:
+                return None
+            url = f"{self.base_url}/media/uploadimg?access_token={access_token}"
+            with open(qr_path, 'rb') as f:
+                files = {'media': ('小程序二维码.png', f, 'image/png')}
+                response = requests.post(url, files=files, timeout=30)
+            if response.status_code == 200:
+                data = response.json()
+                if "url" in data:
+                    logger.info(f"小程序二维码上传成功")
+                    return data["url"]
+            logger.error(f"小程序二维码上传失败: {response.text[:200]}")
+            return None
+        except Exception as e:
+            logger.error(f"上传小程序二维码异常: {e}")
+            return None
+
+    def _build_qr_footer(self, qr_url):
+        """生成带小程序二维码的文章尾部HTML"""
+        return (
+            f'<section style="text-align:center;margin-top:30px;padding:20px 0;border-top:1px solid #e0e0e0;">'
+            f'<p style="font-size:14px;color:#888;margin-bottom:10px;">长按识别下方小程序码，体验「律途智宝」</p>'
+            f'<img src="{qr_url}" style="width:200px;height:200px;object-fit:contain;" />'
+            f'</section>'
+        )
+
     def create_draft(self, articles):
         try:
             access_token = self.get_access_token()
             if not access_token:
                 logger.error("无法获取access_token")
                 return None
+
+            # 上传小程序二维码（仅一次）
+            qr_url = self._upload_qr_code()
 
             url = f"{self.base_url}/draft/add?access_token={access_token}"
 
@@ -316,18 +358,24 @@ class WeixinPublisher:
                 logger.info(f"文章{i+1}摘要: {digest} ({len(digest)}字)")
                 logger.info(f"文章{i+1}类别: {category}")
 
-                # 为每篇文章创建不同主题的封面
+                # 为每篇文章创建不同主题的封面（传入原始标题用于 Unsplash 搜索）
                 logger.info(f"为文章{i+1}创建封面...")
-                thumb_media_id = self.create_thumb_for_article(title, i, category)
+                original_title = article.get("original_title", title)
+                thumb_media_id = self.create_thumb_for_article(title, i, category, original_title=original_title)
                 if not thumb_media_id:
                     thumb_media_id = self.default_thumb_media_id or ""
                     logger.info(f"使用默认封面")
+
+                # 追加小程序二维码尾部
+                content = article["content"]
+                if qr_url:
+                    content = content + self._build_qr_footer(qr_url)
 
                 article_data = {
                     "title": title,
                     "author": article.get("author", "律途IP圈"),
                     "digest": digest,
-                    "content": article["content"],
+                    "content": content,
                     "thumb_media_id": thumb_media_id,
                     "need_open_comment": 1,
                     "only_fans_can_comment": 0

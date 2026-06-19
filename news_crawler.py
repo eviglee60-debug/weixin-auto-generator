@@ -166,6 +166,30 @@ class NewsCrawler:
                     grouped["hot_topic"].append(news_copy)
         grouped["general_ip"] = legit_ip
 
+        # 检查 patent 文章是否真的含专利/IP关键词（来源如 high_court/spc_news 会混入非IP内容）
+        patent_check_kw = ["专利", "发明", "实用新型", "外观设计", "PCT", "知识产权",
+                           "知产", "商标", "著作权", "版权", "技术秘密", "商业秘密",
+                           "侵权", "赔偿", "无效宣告", "审查意见", "授权公告"]
+        legit_patent = []
+        for news in grouped["patent"]:
+            title = news.get("title", "")
+            source = news.get("source", "")
+            # 国际权威专利源放宽检查（EPO/USPTO/JPO 等本身就以专利为主）
+            intl_patent_sources = ["欧洲专利局", "USPTO联邦公报", "Patent Docs",
+                                   "日本特许厅", "台湾智慧财产局", "世界知识产权组织"]
+            if source in intl_patent_sources:
+                legit_patent.append(news)
+                continue
+            if any(kw in title for kw in patent_check_kw):
+                legit_patent.append(news)
+            else:
+                logger.info(f"  patent类非IP内容降级: {title[:30]}... (来源: {source})")
+                if not self.contains_meeting(title):
+                    news_copy = news.copy()
+                    news_copy["category"] = "hot_topic"
+                    grouped["hot_topic"].append(news_copy)
+        grouped["patent"] = legit_patent
+
         # 百度新闻兜底（也做去重检查）
         for cat in ["patent", "general_ip", "hot_topic"]:
             if not grouped[cat]:
@@ -219,7 +243,7 @@ class NewsCrawler:
                 item["region"] = source_cfg["region"]
                 news_list.append(item)
 
-        return news_list[:5]  # 每个源最多5条
+        return news_list[:10]  # 每个源最多10条
 
     def _crawl_source_html(self, source_id, source_cfg):
         """通过HTML爬取单个源"""
@@ -733,6 +757,10 @@ class NewsCrawler:
                             if self._is_company_announcement(title):
                                 logger.debug(f"百度兜底跳过公司公告: {title[:30]}")
                                 continue
+                            # 低质量/营销内容过滤
+                            if self._is_low_quality_baidu(title):
+                                logger.debug(f"百度兜底跳过低质量: {title[:30]}")
+                                continue
                             # 去重检查
                             if normalized_recent:
                                 norm = _punct_re.sub("", _qr.sub("", title))
@@ -852,7 +880,7 @@ class NewsCrawler:
 
         return score
 
-    def _is_similar_to_recent(self, title, recent_titles, threshold=0.4):
+    def _is_similar_to_recent(self, title, recent_titles, threshold=0.6):
         """检查标题是否与最近已发布/已选用的文章标题相似（比对爬取主题）
 
         语言检测基于字符比例（非 extract_keywords 返回值），中文阈值0.4，英文阈值0.3。
@@ -952,5 +980,27 @@ class NewsCrawler:
         title_lower = title.lower()
         for kw in memorial_keywords:
             if kw in title_lower:
+                return True
+        return False
+
+    def _is_low_quality_baidu(self, title):
+        """过滤百度兜底中的低质量/营销/SEO内容"""
+        # 排行榜/推荐类软文
+        ranking_patterns = [
+            r"十大", r"排名", r"排行", r"口碑", r"推荐",
+            r"哪家好", r"哪个好", r"怎么选", r"如何选择",
+            r"最全", r"盘点", r"汇总", r"合集",
+        ]
+        # 营销/推广关键词
+        marketing_keywords = [
+            "推广", "营销", "广告", "代理", "事务所.*口碑",
+            "律师事务所.*推荐", "律师.*排名", "律所.*排名",
+            "性价比", "收费标准", "报价", "优惠",
+        ]
+        for pattern in ranking_patterns:
+            if re.search(pattern, title):
+                return True
+        for pattern in marketing_keywords:
+            if re.search(pattern, title):
                 return True
         return False

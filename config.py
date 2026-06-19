@@ -39,7 +39,7 @@ class Config:
     LOG_DIR = "/opt/weixin-auto-generator/logs"
 
     # 去重追溯天数
-    DEDUP_DAYS = 30
+    DEDUP_DAYS = 14
 
     # 每日文章分类配额
     ARTICLE_CATEGORIES = ["patent", "general_ip", "hot_topic"]

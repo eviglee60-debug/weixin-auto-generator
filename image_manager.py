@@ -53,8 +53,9 @@ class ImageManager:
         keywords = self._extract_keywords(title)
         search_query = keywords[0] if keywords else title[:8]
 
-        # 尝试多个图片源
+        # 尝试多个图片源（Unsplash 优先，质量最高）
         search_sources = [
+            ("Unsplash", self._crawl_unsplash_images),
             ("百度图片", self._crawl_baidu_images),
             ("必应图片", self._crawl_bing_images),
             ("搜狗图片", self._crawl_sogou_images),
@@ -172,6 +173,40 @@ class ImageManager:
                         })
         except Exception as e:
             logger.debug(f"搜狗图片搜索失败: {e}")
+        return images
+
+    def _crawl_unsplash_images(self, keyword, title):
+        """Unsplash 图片搜索（英文搜索效果更好）"""
+        images = []
+        try:
+            from config import Config
+            url = f"{Config.UNSPLASH_API_URL}/search/photos"
+            headers = {
+                "Authorization": f"Client-ID {Config.UNSPLASH_ACCESS_KEY}",
+                "Accept-Version": "v1",
+            }
+            params = {
+                "query": f"law technology abstract {keyword}" if any('一' <= c <= '鿿' for c in keyword) else keyword,
+                "per_page": 10,
+            }
+            resp = requests.get(url, headers=headers, params=params, timeout=15)
+            if resp.status_code == 200:
+                data = resp.json()
+                for item in data.get("results", [])[:5]:
+                    img_url = item["urls"].get("regular") or item["urls"].get("raw")
+                    imgs = item.get("urls", {})
+                    if img_url:
+                        images.append({
+                            "url": img_url,
+                            "width": item.get("width", 300),
+                            "height": item.get("height", 200),
+                            "title": title,
+                            "photographer": (item.get("user") or {}).get("name", ""),
+                        })
+            elif resp.status_code == 403:
+                logger.debug(f"Unsplash API 限流: {resp.text[:100]}")
+        except Exception as e:
+            logger.debug(f"Unsplash 搜索失败: {e}")
         return images
 
     def _extract_keywords(self, title):
