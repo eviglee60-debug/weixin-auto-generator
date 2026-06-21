@@ -816,6 +816,9 @@ class NewsCrawler:
             "服务万里行", "督察组", "统计督察",
             # EPO/国际组织低价值内容
             "监督审核", "年度研讨会", "合作备忘录",
+            # 英文会议信号
+            "annual meeting", "stakeholder meeting",
+            "public hearing", "workshop on", "conference on",
         ]
         for kw in meeting_signals:
             if kw in title:
@@ -957,13 +960,17 @@ class NewsCrawler:
             r'关于.*商标注册证书',
             r'关于.*专利证书',
             r'关于.*著作权登记',
-            # 专利数量公告："累计获得授权发明专利\d+项"
+            # 专利数量公告
             r'累计获得授权',
             r'获得授权专利.*项',
             r'获得授权发明.*项',
             r'实用新型专利\d+项.*外观',
             r'公布.*成绩单',
             r'公司获得.*专利.*项',
+            r'公司已取得.*专利.*项',
+            r'已取得\d+项.*专利',
+            r'拥有\d+项.*专利',
+            r'有效发明专[利权].*\d+项',
         ]
         for pattern in routine_patterns:
             if re.search(pattern, title):

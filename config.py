@@ -312,6 +312,8 @@ class Config:
         "调研考察", "视察", "出席活动",
         "动员部署", "推进会议", "工作会议",
         "选举", "换届", "干部任免",
+        # 外事会见
+        "会见", "接见", "拜会", "走访",
         # 党建宣传用语
         "带头抓落实", "以上率下", "统筹协调", "攻坚克难",
         "抓落实", "勇担当", "敢作为",
@@ -336,6 +338,14 @@ class Config:
         "督察组", "进驻", "统计督察",
         # 活动通知明显特征（不单独用"活动"以免误伤"反不正当竞争活动"等）
         "活动的通知", "活动方案",  # 活动通知/活动方案 — 政府活动公告
+        # 英文会议/活动关键词（过滤 EPO/USPTO/WIPO 等英文源的会议通知）
+        "annual meeting", "Annual Meeting",
+        "stakeholder meeting", "Stakeholder Meeting",
+        "public hearing", "Public Hearing",
+        "workshop on", "Workshop on",
+        "conference on", "Conference on",
+        "seminar on", "Seminar on",
+        "meeting",  # 英文标题中的 meeting 通常是会议通知
     ]
 
     # ============================================================
