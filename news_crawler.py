@@ -40,7 +40,11 @@ class NewsCrawler:
     def contains_meeting(self, text):
         """检查是否为会议/活动类内容"""
         for word in self.meeting_filter:
-            if word in text:
+            if '*' in word or '.' in word:
+                # 正则模式（含 * 或 . 的关键词）
+                if re.search(word, text):
+                    return True
+            elif word in text:
                 return True
         return False
 
