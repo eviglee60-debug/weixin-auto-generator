@@ -108,8 +108,10 @@ class NewsCrawler:
         filtered = []
         for news in all_news:
             if self.contains_sensitive(news["title"]):
+                logger.debug(f"  过滤[敏感]: {news['title'][:40]}")
                 continue
             if self.contains_meeting(news["title"]):
+                logger.info(f"  过滤[会议/通知]: {news['title'][:50]}")
                 continue
             if self.is_duplicate(news["title"]):
                 continue
